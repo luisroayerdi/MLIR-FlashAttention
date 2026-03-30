@@ -1,13 +1,12 @@
-# Vector addition Tutorial
 Vector addition is the first successful example of using an in-tree MLIR dialect and MLIR passes to perform a vector addition in parallel. We utilize the 'linalg' dialect to create the high-level IR and from there we used multiple MLIR passes to get an executable, including OpenMP to support shared memory parallelism for the vector addition.
 ## Basic Definitions
 ### MLIR
-MLIR is a framework for building reusable and extensible compiler infrastructure. Unlike traditional compilers (like LLVM) that use a single, fixed set of instructions, MLIR allows you to define your own "languages" at different levels of abstraction—from high-level math to low-level machine code all within the same system.
+[MLIR](https://mlir.llvm.org/) is a framework for building reusable and extensible compiler infrastructure build from the [LLVM](https://llvm.org/). Unlike traditional compilers that use a single, fixed set of instructions, MLIR allows you to define your own "languages" at different levels of abstraction—from high-level math to low-level machine code all within the same system.
 ### MLIR Dialects
-A **Dialect** is a self-contained "vocabulary" in MLIR. It groups together related types, operations, and attributes.
+A [**Dialect**](https://mlir.llvm.org/docs/Dialects/) is a self-contained "vocabulary" in MLIR. It groups together related types, operations, and attributes.
 ### MLIR ops
 **Ops** are the fundamental units of code in MLIR. Everything is an operation, from a simple addition to a complex neural network layer or even a function definition.
-- Unlike instructions in other compilers, MLIR ops are **extensible**—you can define new ones whenever you need a specific semantic that doesn't exist yet.
+- Unlike instructions in other compilers, MLIR ops are **extensible**, you can define new ones whenever you need a specific semantic that doesn't exist yet.
 ### MLIR passes
 A **Pass** is a specific transformation or analysis performed on the MLIR code.
 - **Transformation Passes:** Convert code from one dialect to another (Lowering) or optimize code within a dialect.
@@ -116,3 +115,4 @@ We run to perform the vector addition:
 | `-convert-func-to-llvm`             | func->llvm                | Converts arithmetic operations (arith.addf)<br>into LLVM arithmetic (llvm.fadd).                |
 | `-finalize-meref-to-llvm`           | memref->llvm              | Converts function signatures and calls to<br>LLVM function format.                              |
 | `-reconcile-unrealized-casts`       | (cleanup)                 | Removes temporary type conversion artifacts<br>from previous passes.                            |
+
