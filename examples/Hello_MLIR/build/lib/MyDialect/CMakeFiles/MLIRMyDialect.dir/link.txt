@@ -1,0 +1,2 @@
+/usr/bin/ar qc libMLIRMyDialect.a CMakeFiles/obj.MLIRMyDialect.dir/MyDialect.cpp.o
+/usr/bin/ranlib libMLIRMyDialect.a

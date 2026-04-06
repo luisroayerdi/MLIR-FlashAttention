@@ -1,0 +1,24 @@
+--- !FileInfo:
+  filepath: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect/MyDialect.td"
+  includes: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect;/include;/Users/luisroayerdi/Coding/llvm-project/llvm/include;/Users/luisroayerdi/Coding/llvm-project/build/include;/Users/luisroayerdi/Coding/llvm-project/mlir/include;/Users/luisroayerdi/Coding/llvm-project/build/tools/mlir/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/build/include"
+--- !FileInfo:
+  filepath: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect/MyDialect.td"
+  includes: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect;/include;/Users/luisroayerdi/Coding/llvm-project/llvm/include;/Users/luisroayerdi/Coding/llvm-project/build/include;/Users/luisroayerdi/Coding/llvm-project/mlir/include;/Users/luisroayerdi/Coding/llvm-project/build/tools/mlir/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/build/include"
+--- !FileInfo:
+  filepath: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect/MyDialect.td"
+  includes: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect;/include;/Users/luisroayerdi/Coding/llvm-project/llvm/include;/Users/luisroayerdi/Coding/llvm-project/build/include;/Users/luisroayerdi/Coding/llvm-project/mlir/include;/Users/luisroayerdi/Coding/llvm-project/build/tools/mlir/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/build/include"
+--- !FileInfo:
+  filepath: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect/MyDialect.td"
+  includes: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect;/include;/Users/luisroayerdi/Coding/llvm-project/llvm/include;/Users/luisroayerdi/Coding/llvm-project/build/include;/Users/luisroayerdi/Coding/llvm-project/mlir/include;/Users/luisroayerdi/Coding/llvm-project/build/tools/mlir/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/build/include"
+--- !FileInfo:
+  filepath: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect/MyDialect.td"
+  includes: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect;/include;/Users/luisroayerdi/Coding/llvm-project/llvm/include;/Users/luisroayerdi/Coding/llvm-project/build/include;/Users/luisroayerdi/Coding/llvm-project/mlir/include;/Users/luisroayerdi/Coding/llvm-project/build/tools/mlir/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/build/include"
+--- !FileInfo:
+  filepath: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect/MyDialect.td"
+  includes: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect;/include;/Users/luisroayerdi/Coding/llvm-project/llvm/include;/Users/luisroayerdi/Coding/llvm-project/build/include;/Users/luisroayerdi/Coding/llvm-project/mlir/include;/Users/luisroayerdi/Coding/llvm-project/build/tools/mlir/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/build/include"
+--- !FileInfo:
+  filepath: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect/MyDialect.td"
+  includes: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect;/include;/Users/luisroayerdi/Coding/llvm-project/llvm/include;/Users/luisroayerdi/Coding/llvm-project/build/include;/Users/luisroayerdi/Coding/llvm-project/mlir/include;/Users/luisroayerdi/Coding/llvm-project/build/tools/mlir/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/build/include"
+--- !FileInfo:
+  filepath: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect/MyDialect.td"
+  includes: "/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include/MyDialect;/include;/Users/luisroayerdi/Coding/llvm-project/llvm/include;/Users/luisroayerdi/Coding/llvm-project/build/include;/Users/luisroayerdi/Coding/llvm-project/mlir/include;/Users/luisroayerdi/Coding/llvm-project/build/tools/mlir/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/include;/Users/luisroayerdi/Coding/MLIR-Scheduling-Kernel/Hello_MLIR/build/include"

@@ -1,0 +1,20 @@
+
+MLIR Compilation process
+Source -> AST -> MLIR -> Lowering -> Passes -> LLVMIR -> run
+
+Chapter 1 (Source->AST):
+Building and Running Commands (Linux)
+cmake --build build --target toyc-ch1
+./build/bin/toyc-ch1 mlir/test/Examples/Toy/Ch1/ast.toy -emit=ast
+
+Chapter 2 (AST->MLIR):
+Building and Running Commands (Linux)
+cmake --build build --target toyc-ch2
+./build/bin/toyc-ch2 mlir/test/Examples/Toy/Ch2/ast.toy -emit=ast
+
+In MLIR, Operations are the core unit of abstraction and computation, similar in many ways to LLVM instructions. Operations can have application-specific semantics and can be used to represent all of the core IR structures in LLVM: instructions, globals (like functions), modules, etc.
+
+Chapter 3:
+Building and Running Commands (Linux)
+cmake --build build --target toyc-ch3
+./build/bin/toyc-ch3 mlir/test/Examples/Toy/Ch3/trivial_reshape.toy -emit=mlir
