@@ -179,7 +179,7 @@ Pass 5: Backend lowering (nvgpu dialect)
 Output: Executable GPU kernel
 ```
 
-**Each pass allow us to measure impact individually.
+Each pass allow us to measure impact individually.
 ### 3.3 Pass Descriptions
 
 #### **Pass 1: Operation Fusion**
