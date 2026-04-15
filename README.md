@@ -1,7 +1,4 @@
 # Deconstructing FlashAttention: A Compiler-Centric Analysis of Attention Kernel Optimization
-
-## Research Presentation Document
-
 ---
 
 ## 1. Introduction
