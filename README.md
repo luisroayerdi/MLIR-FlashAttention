@@ -29,3 +29,4 @@ The goal of evaluation is to characterize the compiler pipeline:
 - **Measurement axes** kernel launch overhead, memory traffic (via `ncu`), and compile-time pass cost; _not_ just wall-clock throughput
 
 The expectation is that the MLIR pipeline won't match FA2 on raw speed. The interesting result is **how close it gets and why**, and whether the same pipeline compiles cleanly for a second backend.
+
