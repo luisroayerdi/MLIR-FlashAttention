@@ -1,4 +1,4 @@
-# Deconstructing FlashAttention: A Compiler-Centric Analysis of Attention Kernel Optimization
+# Deconstructing FlashAttention: A Compiler-Centric Analysis of Attention Kernel Optimizations
 ---
 
 ## 1. Introduction
