@@ -1,0 +1,24 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+*.dylib
+
+# Generated files
+*.inc
+*.h.inc
+*.cpp.inc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Mac
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
