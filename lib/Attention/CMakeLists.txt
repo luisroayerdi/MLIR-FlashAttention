@@ -1,8 +1,10 @@
 add_mlir_dialect_library(MLIRAttention
-        AttentionTypes.cpp
         AttentionDialect.cpp
         AttentionOps.cpp
+        AttentionTypes.cpp
         AttentionPasses.cpp
+        FusionPass.cpp
+        TilingPass.cpp
 
         ADDITIONAL_HEADER_DIRS
         ${PROJECT_SOURCE_DIR}/include/Attention
@@ -15,4 +17,12 @@ add_mlir_dialect_library(MLIRAttention
         MLIRIR
         MLIRInferTypeOpInterface
         MLIRFuncDialect
+        MLIRLinalgDialect
+        MLIRMemRefDialect
+        MLIRAffineDialect
+        MLIRAffineUtils
+        MLIRArithDialect
+        MLIRMathDialect
+        MLIRTransformUtils
+        MLIRRewrite
         )
