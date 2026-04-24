@@ -10,6 +10,7 @@
 
 #include "Attention/AttentionDialect.h"
 #include "Attention/AttentionOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/Pass.h"
 #include <memory>
 
