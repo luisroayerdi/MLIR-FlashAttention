@@ -68,15 +68,41 @@ with structured input IR.
 ## Fusion pass: scale extracted from linalg.generic body
 
 **Decision:** The scale value is read from the body of the scale generic by
-finding the first `arith.mulf` whose one operand is not a block argument.
+finding the first `arith.mulf` whose one operand is not a *local* block argument
+of the generic's own body.
 
 **Why:** The scale is an outer SSA value captured by the region. There is no
 dedicated operand slot for it in `linalg.generic` (it's not in `ins`).
+
+**Non-obvious MLIR behavior:** In MLIR, function arguments are `BlockArgument`s
+— they are the block arguments of the function's entry block. A naive
+`!isa<BlockArgument>(v)` check incorrectly rejects function-argument scale
+values. The correct check is whether the argument's parent block is the
+linalg.generic body itself (`ba.getParentBlock() == body`), distinguishing
+local per-element args from outer captured values.
 
 **Cost:** Fragile: only works if the scale generic body is exactly
 `arith.mulf(block_arg, outer_scale)`. If the scale generic applies additional
 operations (e.g., negation), extraction fails. Acceptable for the structured
 test input; a production pass would need a more robust body analysis.
+
+---
+
+## Fusion pass: QK^T matched as linalg.generic, not linalg.matmul
+
+**Decision:** The pattern matches the QK^T step as a `linalg.generic` with
+`(parallel, parallel, reduction)` iterator types, not as a named `linalg::MatmulOp`.
+
+**Why:** The test IR and real unfused attention code represent QK^T as a
+`linalg.generic` with explicit indexing maps (transposing K on the fly). A
+`linalg.matmul` would require the K matrix to already be transposed in memory,
+adding an explicit transpose op before fusion. The generic form is more
+natural for the input IR the fusion pass targets.
+
+**Cost:** Design.md §3.2 describes the anchor as `linalg.matmul(%Q, %K)` for
+the QK step — this is inaccurate. The anchor is the PV `linalg.matmul`; the
+QK step is found via `findGenericWriterOf`. Design.md's algorithm pseudocode
+needs updating to reflect this.
 
 ---
 
@@ -187,3 +213,25 @@ hardware-optimal size for the primary target.
 puts pressure on the stack. The `--tile-size=32` option should be used for CPU
 tests. The default is intentionally kept at 128 to avoid forgetting to change
 it when moving to GPU.
+
+---
+
+## Pass implementations declare getDependentDialects
+
+**Decision:** Both `FusionPassImpl` and `TilingPassImpl` override
+`getDependentDialects()` to explicitly declare the dialects whose ops they
+create at runtime.
+
+**Why:** MLIR only loads a dialect into the `MLIRContext` when it is
+encountered in the input IR being parsed. If the input contains no
+`attention.fused` ops (as is the case for `fusion.mlir`, which contains only
+standard linalg ops), the attention dialect is never loaded — and
+`FusedOp::create` crashes with "op not known in MLIRContext". The same applies
+to `arith`, `affine`, `math`, and `memref` ops created by the tiling pass on
+an input that only contains `attention.fused`. `getDependentDialects` is the
+MLIR-idiomatic hook for declaring "this pass creates ops from these dialects;
+load them before the pass runs."
+
+**Cost:** Each pass must be kept in sync with the set of dialects it creates
+ops from. Missing a dialect produces a runtime crash rather than a compile-time
+error.
