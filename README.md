@@ -153,3 +153,54 @@ $OPT test/Attention/tiling.mlir --tiling-pass="tile-size=32" 2>/dev/null | \
 ```
 
 `FileCheck` is in your LLVM tools directory (e.g. `/opt/homebrew/opt/llvm/bin/FileCheck` on macOS with Homebrew LLVM).
+
+---
+
+## Project Documents
+
+The project is driven by three documents with different roles. **Requirements and Design are the stable foundation** — they define what the project is trying to do and why. TRADEOFFS is a living record of every non-obvious implementation decision made along the way.
+
+### [Requirements.md](Requirements.md) — What and Why
+
+Defines the research question, success criteria, and pass specifications. Reading this first gives the full picture of what each pass is supposed to accomplish and how performance will be measured. Key sections:
+
+- **§1 Problem Statement** — why hand-written CUDA is the wrong approach for research
+- **§2 Success Criteria** — minimum viable (Passes 1–2 on CPU), target (GPU + tensor cores), stretch (FA2 optimizations)
+- **§3 FlashAttention Techniques** — which FA1/FA2 techniques each pass implements and why
+- **§4 Pass Specifications** — per-pass input IR, output IR, algorithm, and test commands
+- **§6 Baselines** — PyTorch unfused, torch.compile, FlashAttention-2 (the ablation study targets)
+- **§9 Development Workflow** — the propose → confirm → implement protocol
+
+> The IR snippets in Requirements.md are illustrative. Where they conflict with Design.md, Design.md takes precedence.
+
+### [Design.md](Design.md) — How
+
+The technical design approved before implementation began. Contains the exact IR transformation at each stage, the `attention.fused` op definition, per-pass algorithms in pseudocode, and the rationale for every structural decision. This is the reference for what the code is supposed to produce.
+
+Key sections:
+
+- **§1 Architecture Overview** — the full transformation chain from unfused linalg to nvgpu
+- **§2 Dialect Extension** — `attention.fused` op definition (TableGen + rationale)
+- **§3 Pass 1: Fusion** — pattern matching algorithm and IR examples
+- **§4 Pass 2: Tiling** — online softmax algorithm and full post-tiling IR structure
+- **§5–7 Passes 3–5** — vectorization, mask specialization, GPU lowering (designed; Passes 3–4 not yet implemented; Pass 5 deferred until GPU hardware)
+
+### [TRADEOFFS.md](TRADEOFFS.md) — Decisions Made During Implementation
+
+Updated continuously as implementation reveals decisions not fully resolved by Design.md. Each entry records what was decided, why, and what it costs. This is the right place to look when the code does something that seems surprising relative to the design.
+
+Current entries cover: why V is in `attention.fused`, why scale is an SSA operand, the memref-based pattern matching strategy, how the scale value is extracted from the linalg.generic body, why the tiling pass fully expands rather than tiling-in-place, and dialect loading requirements.
+
+---
+
+## Implementation Status
+
+| Pass | Flag | Status |
+|------|------|--------|
+| 1 — Fusion | `--fusion-pass` | ✅ Implemented, FileCheck passing |
+| 2 — Tiling | `--tiling-pass` | ✅ Implemented, FileCheck passing |
+| 3 — Vectorization | `--vectorization-pass` | Not yet implemented |
+| 4 — Mask Specialization | `--mask-specialization-pass` | Not yet implemented |
+| 5 — GPU Lowering | `--gpu-lowering-pass` | Deferred (requires GPU hardware) |
+
+Current milestone: CPU correctness validation (Passes 1–2 producing correct IR). Next step: numerical validation against PyTorch, then Pass 3.
