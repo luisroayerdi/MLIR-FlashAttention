@@ -18,6 +18,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Attention/AttentionDialect.h"
 #include "Attention/AttentionOps.h"
 #include "Attention/AttentionPasses.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -74,14 +75,21 @@ static linalg::GenericOp findGenericWriterOf(Value buf) {
 // multiplied with the element (i.e., not a block argument).
 // Looks for the first arith.mulf whose one operand is not a block arg.
 static Value extractScaleFromBody(linalg::GenericOp scaleGeneric) {
-  for (Operation &op : scaleGeneric.getBody()->getOperations()) {
+  Block *body = scaleGeneric.getBody();
+  // Returns true if `v` is a block argument local to the generic's body
+  // (i.e. one of the per-element args), not an outer captured value.
+  auto isLocalArg = [body](Value v) {
+    auto ba = dyn_cast<BlockArgument>(v);
+    return ba && ba.getParentBlock() == body;
+  };
+  for (Operation &op : body->getOperations()) {
     auto mulf = dyn_cast<arith::MulFOp>(&op);
     if (!mulf)
       continue;
     Value lhs = mulf->getOperand(0), rhs = mulf->getOperand(1);
-    if (!isa<BlockArgument>(lhs))
+    if (!isLocalArg(lhs))
       return lhs;
-    if (!isa<BlockArgument>(rhs))
+    if (!isLocalArg(rhs))
       return rhs;
   }
   return nullptr;
@@ -172,6 +180,13 @@ struct FuseAttentionPattern : public OpRewritePattern<linalg::MatmulOp> {
 
 struct FusionPassImpl : public impl::FusionPassBase<FusionPassImpl> {
   using impl::FusionPassBase<FusionPassImpl>::FusionPassBase;
+
+  // Tell the pass infrastructure to load the attention dialect before this
+  // pass runs, since the pass creates attention.fused ops that aren't present
+  // in the input IR.
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<AttentionDialect>();
+  }
 
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());

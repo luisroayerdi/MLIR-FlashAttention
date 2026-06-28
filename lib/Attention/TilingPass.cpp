@@ -23,6 +23,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Attention/AttentionDialect.h"
 #include "Attention/AttentionOps.h"
 #include "Attention/AttentionPasses.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -398,6 +399,16 @@ struct TilingPattern : public OpRewritePattern<FusedOp> {
 
 struct TilingPassImpl : public impl::TilingPassBase<TilingPassImpl> {
   using impl::TilingPassBase<TilingPassImpl>::TilingPassBase;
+
+  // Declare dialects created by this pass so they are loaded before it runs.
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<AttentionDialect,
+                    affine::AffineDialect,
+                    arith::ArithDialect,
+                    linalg::LinalgDialect,
+                    math::MathDialect,
+                    memref::MemRefDialect>();
+  }
 
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
