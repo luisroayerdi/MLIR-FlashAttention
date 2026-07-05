@@ -1,8 +1,12 @@
 # MLIR Attention Pipeline — Design Document
 
-**Version:** 1.0  
-**Date:** April 2026  
-**Status:** Approved for implementation
+**Version:** 1.1  
+**Date:** April 2026 (corrected July 2026)  
+**Status:** Approved for implementation. §2.1, §3.2–3.4, §4.4 corrected to match the
+as-built Pass 1–2 implementation (`FusedOp` has no SSA result; QK^T is matched as
+`linalg.generic`, not `linalg.matmul`; scale uses `mulf` not `divf`; fusion matching
+walks buffer DPS writers, not SSA def-use chains). See `TRADEOFFS.md` for the
+original discovery of these discrepancies.
 
 ---
 
@@ -22,18 +26,18 @@
 
 ```
 // Stage 0: Input (unfused)
-%qk  = linalg.matmul ins(%Q, %K)        // [seq_q x seq_k]
-%sc  = linalg.generic { divf %qk, %s }  // scale
-%msk = linalg.generic { select ... }    // causal mask
-%p   = linalg.generic { softmax %msk }  // attention weights [seq_q x seq_k]
-%out = linalg.matmul ins(%p, %V)        // [seq_q x head_dim]
+%qk  = linalg.generic { mulf/addf, Q x K^T }  // QK^T [seq_q x seq_k] (parallel/parallel/reduction; not a named matmul — K is read transposed via indexing maps)
+%sc  = linalg.generic { mulf %qk, %scale }    // scale
+%msk = linalg.generic { select ... }          // causal mask
+%p   = linalg.softmax dimension(1) ins(%msk)  // attention weights [seq_q x seq_k]
+%out = linalg.matmul ins(%p, %V)              // [seq_q x head_dim] ← fusion anchor
 
     ↓  Pass 1: Fusion
 
-// Stage 1: Fused high-level op
-%out = attention.fused ins(%Q, %K, %V, %scale)
-                       mask(%mask)
-                       outs(%output)
+// Stage 1: Fused high-level op (no SSA result — writes %output in place)
+attention.fused ins(%Q, %K, %V, %scale)
+                mask(%mask)
+                outs(%output)
 
     ↓  Pass 2: Tiling (expands attention.fused + introduces online softmax)
 
@@ -117,15 +121,17 @@ def Attention_FusedOp : Attention_Op<"fused", [
         Optional<MemRefOf<[I1]>>:$mask, // [seq_q x seq_k]; absent means no masking
         MemRefOf<[F32]>:$output         // [seq_q x head_dim]; written in-place
     );
-    let results = (outs MemRefOf<[F32]>:$result);
+    // No SSA results — pure side-effecting write to `output` (DPS style, like linalg).
 
     let assemblyFormat = [{
         `ins` `(` $Q `,` $K `,` $V `:` type($Q) `,` type($K) `,` type($V) `)`
         `scale` `(` $scale `:` type($scale) `)`
         (`mask` `(` $mask^ `:` type($mask) `)`)?
         `outs` `(` $output `:` type($output) `)`
-        attr-dict `->` type($result)
+        attr-dict
     }];
+
+    let hasVerifier = 1;
 }
 ```
 
@@ -133,7 +139,7 @@ def Attention_FusedOp : Attention_Op<"fused", [
 - V is included so that the tiling pass can tile the complete attention computation and introduce online softmax accumulation across K/V tiles. Without V, the NxN attention matrix must be fully materialized between passes.
 - `scale` is an SSA operand (not an attribute) because it is derived from `head_dim` at runtime (i.e., `1/sqrt(d_k)`), not a compile-time constant.
 - `mask` is `Optional` — absent means unmasked attention; Pass 4 will further specialize masked tiles.
-- `output` is an `outs` buffer (written in-place). The result is aliased to `output` for SSA tracking, following the `linalg` convention.
+- `output` is an `outs` buffer (written in-place). The op has no SSA results at all — callers reference the written data through `output` directly, matching `linalg`'s destination-passing-style (DPS) convention for ops with no result.
 
 ### 2.2 Dialect Driver Changes
 
@@ -173,73 +179,81 @@ Recognize the 5-op attention sequence and replace it with a single `attention.fu
 
 ### 3.2 Pattern Matching
 
-The fusion pass uses a `RewritePattern` on `linalg.matmul` (the final PV matmul is the anchor). Walking backwards through SSA def-use chains, it verifies the following sequence:
+The fusion pass uses a `RewritePattern` on `linalg.matmul` (the final PV matmul is the anchor). All operands are memrefs, not tensors, so a buffer can in principle be written by more than one op — backward matching cannot rely on pure SSA def-use chains. Instead, each step asks "which op is the *unique* writer of this buffer?" via `DestinationStyleOpInterface::getDpsInits()`, bailing out (pattern fails to match) if a buffer has more than one writer:
 
 ```
-linalg.matmul(%Q, %K)          → %qk
-linalg.generic(divf, %qk, %s)  → %scaled    (scale op)
-linalg.generic(select, %scaled) → %masked   (mask op; optional)
-linalg.generic(softmax, %masked) → %probs   (softmax op)
-linalg.matmul(%probs, %V)       → %out      (anchor; fusion root)
+linalg.generic(mulf/addf, %Q, %K)      → %qk      (QK^T; parallel/parallel/reduction —
+                                                    not a named matmul, since K is read
+                                                    transposed via indexing maps rather
+                                                    than physically transposed in memory)
+linalg.generic(mulf, %qk, %scale)      → %scaled  (scale op)
+linalg.generic(select, %scaled, %mask) → %masked  (mask op; optional — identified by
+                                                    having 2 DPS inputs instead of 1)
+linalg.softmax(%masked)                 → %probs   (named softmax op)
+linalg.matmul(%probs, %V)               → %out     (anchor; fusion root)
 ```
 
 ### 3.3 Algorithm (Pseudocode)
 
 ```
 pattern FuseAttention matches linalg.matmul(%probs, %V) → %out:
-  if defining_op(%probs) is NOT linalg.softmax:
+  if unique DPS writer of %probs is NOT linalg.softmax:
     return failure
 
   %masked = input of softmax
-  if defining_op(%masked) is linalg.generic with select:
+  if unique DPS writer of %masked is linalg.generic with 2 DPS inputs (select):
     has_mask = true
-    %scaled = input of mask op
+    %scaled = first DPS input of mask op
   else:
     has_mask = false
     %scaled = %masked
 
-  if defining_op(%scaled) is NOT linalg.generic with divf:
+  if unique DPS writer of %scaled is NOT linalg.generic (scale; mulf):
     return failure
 
-  %qk = input of scale op
-  if defining_op(%qk) is NOT linalg.matmul:
+  %qk = first DPS input of scale op
+  if unique DPS writer of %qk is NOT linalg.generic with ≥2 DPS inputs (QK^T):
     return failure
 
-  (%Q, %K) = operands of %qk matmul
-  (%scale) = scale operand from scale op
-  (%mask)  = mask operand if has_mask else absent
+  (%Q, %K) = DPS inputs of %qk generic
+  (%scale) = scale SSA value extracted from scale op's body — the first arith.mulf
+             operand that is NOT a block argument local to the generic's own body
+             (distinguishes the outer captured scale from the per-element block args)
+  (%mask)  = mask buffer if has_mask else absent
 
-  verify no uses of %qk, %scaled, %masked, %probs outside this chain
-
-  output = allocate memref [seq_q x head_dim]
-  %result = attention.fused ins(%Q, %K, %V, %scale)
-                             mask(%mask)   // optional
-                             outs(%output) -> memref
-
-  replace %out with %result
-  erase original 5 ops
+  insert attention.fused ins(%Q, %K, %V) scale(%scale) [mask(%mask)] outs(%outBuf)
+  erase pvMatmul, softmax, [maskOp], scaleOp, qkGeneric
+  // No SSA result to thread through: attention.fused has no results, so %outBuf
+  // continues to be used downstream exactly as it was before fusion.
 ```
 
 ### 3.4 IR Example
 
-**Input:**
+**Input:** (memref-based; ops with `outs` write in place and return no SSA result)
 ```mlir
-%qk     = linalg.matmul ins(%Q, %K : memref<1024x64xf32>, memref<1024x64xf32>)
-                         outs(%qk_buf : memref<1024x1024xf32>) -> memref<1024x1024xf32>
-%scaled = linalg.generic ... { divf %qk, %scale } ...
-%masked = linalg.generic ... { select %causal_mask, %scaled, %neg_inf } ...
-%probs  = linalg.generic ... { exp / sum for softmax } ...
-%out    = linalg.matmul ins(%probs, %V : ...)
-                         outs(%out_buf : memref<1024x64xf32>) -> memref<1024x64xf32>
+linalg.generic { iterator_types = ["parallel","parallel","reduction"], ... }  // QK^T
+  ins(%Q, %K : memref<1024x64xf32>, memref<1024x64xf32>)
+  outs(%qk_buf : memref<1024x1024xf32>) { ^bb0(...): arith.mulf/addf ... }
+
+linalg.generic { ... } ins(%qk_buf : memref<1024x1024xf32>)      // scale
+  outs(%sc_buf : memref<1024x1024xf32>) { ^bb0(...): arith.mulf %in, %scale ... }
+
+linalg.generic { ... } ins(%sc_buf, %causal_mask : ..., memref<1024x1024xi1>)  // mask
+  outs(%mk_buf : memref<1024x1024xf32>) { ^bb0(...): arith.select ... }
+
+linalg.softmax dimension(1) ins(%mk_buf : memref<1024x1024xf32>)
+  outs(%probs_buf : memref<1024x1024xf32>)
+
+linalg.matmul ins(%probs_buf, %V : memref<1024x1024xf32>, memref<1024x64xf32>)  // PV; anchor
+  outs(%out_buf : memref<1024x64xf32>)
 ```
 
 **Output:**
 ```mlir
-%out = attention.fused ins(%Q, %K, %V : memref<1024x64xf32>, ...)
-                        scale(%scale : f32)
-                        mask(%causal_mask : memref<1024x1024xi1>)
-                        outs(%out_buf : memref<1024x64xf32>)
-                        -> memref<1024x64xf32>
+attention.fused ins(%Q, %K, %V : memref<1024x64xf32>, memref<1024x64xf32>, memref<1024x64xf32>)
+                scale(%scale : f32)
+                mask(%causal_mask : memref<1024x1024xi1>)
+                outs(%out_buf : memref<1024x64xf32>)
 ```
 
 ### 3.5 Known Limitations
@@ -336,12 +350,19 @@ affine.for %i = 0 to %seq_q step 128 {
     // Optional: apply mask tile
     // (mask subview: [%i, %j][128, 128])
 
-    // Step 2: Online softmax update (linalg.generic over rows)
-    %m_new = memref.alloca() : memref<128xf32>
-    %P_buf = memref.alloca() : memref<128x128xf32>
-    linalg.generic ... { compute m_new, P_buf, l_new, update O_acc }
+    // Step 2: Online softmax update — implemented as several distinct
+    // linalg.generic ops (each a small parallel or row-reduction op), not
+    // one combined generic:
+    //   m_tile  = rowReduce(max, S_tile)              // this tile's row max
+    //   m_new   = elementwise max(m_acc, m_tile)
+    //   alpha   = elementwise exp(m_acc - m_new)       // rescale factor
+    //   P_tile  = elementwise exp(S_tile - m_new)      // row-broadcast subtract
+    //   P_sum   = rowReduce(add, P_tile)
+    //   l_new   = elementwise alpha * l_acc + P_sum
+    //   O_acc   = rowBroadcast(alpha * O_acc)          // rescale previous output
+    //   O_acc  += P_tile @ V_tile                       // matmul-style generic
 
-    // Step 3: Update m_acc, l_acc
+    // Step 3: memref.copy m_new → m_acc, l_new → l_acc
   }
 
   // Final rescale and write output tile
