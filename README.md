@@ -189,6 +189,31 @@ The tool paths (`attention-opt`, `mlir-opt`, `mlir-runner`, runner-utils shared 
 
 ---
 
+## CPU Execution Benchmarking
+
+`test/numerical/benchmark.py` implements Requirements.md §5.2 (CPU Validation — the pre-GPU-hardware checkpoint): it times the naive unfused baseline against the Pass 1+2 (fusion+tiling) output, both JIT-executed via `mlir-runner`, and checks the fused version is `>1.2x` faster. Timing is done *inside* the compiled program via `rtclock()`/`printF64()` (bracketing many repeated calls after an untimed warmup loop), so process startup and JIT-compile time don't pollute the measurement. Each config runs several independent trials; results are reported as median ± stdev, with a warning if stdev exceeds 5% of the median.
+
+It also re-runs the numerical correctness check (`validate.run_case`) for the same shape before timing — per §5.2's "if fails: STOP, do not proceed to GPU" rule, a config that isn't numerically correct is reported as failed without being benchmarked.
+
+**Run the default suite** (seq lengths 128–512, head_dim 64, tile 32, with and without a causal mask):
+
+```bash
+source .venv/bin/activate
+cd test/numerical && python3 benchmark.py --suite
+```
+
+**Run a single configuration:**
+
+```bash
+python3 test/numerical/benchmark.py --seq-q 512 --seq-k 512 --head-dim 64 --tile-size 32 --trials 5
+```
+
+Requirements.md §5.2 also calls for `perf stat -e cycles,instructions,cache-misses` profiling — that's Linux-only and unavailable on macOS, so this harness reports wall-clock speedup only (the actual quantity the acceptance gate checks). See TRADEOFFS.md.
+
+**Current result:** all 4 default-suite configs pass, with measured speedups of 1.36x–1.48x — comfortably clearing the §5.2 `>1.2x` threshold and approaching the §5.4 `>1.5x` Go/No-Go bar for GPU work.
+
+---
+
 ## Project Documents
 
 The project is driven by three documents with different roles. **Requirements and Design are the stable foundation** — they define what the project is trying to do and why. TRADEOFFS is a living record of every non-obvious implementation decision made along the way.
@@ -236,4 +261,4 @@ Current entries cover: why V is in `attention.fused`, why scale is an SSA operan
 | 4 — Mask Specialization | `--mask-specialization-pass` | Not yet implemented |
 | 5 — GPU Lowering | `--gpu-lowering-pass` | Deferred (requires GPU hardware) |
 
-Current milestone: numerical validation (Requirements.md §5.1) passing for Passes 1–2 on small shapes (`test/numerical/`, 5/5 default-suite configs, masked and unmasked). Next step: CPU execution benchmarking (§5.2 — speedup vs. unfused baseline), then Pass 3.
+Current milestone: CPU Validation checkpoint (Requirements.md §5.2) passing — numerical correctness (§5.1) and CPU execution speedup (§5.2) both hold for Passes 1–2 (`test/numerical/`, 4/4 default-suite benchmark configs, 1.36x–1.48x speedup vs. unfused). Minimum Viable success criteria (§2) are now met. Next step: Pass 3 (Vectorization).

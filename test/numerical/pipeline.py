@@ -100,3 +100,40 @@ def run_module(module_text: str, tile_size: int, tools: Toolchain) -> list:
         raise RuntimeError(f"Could not find printed memref data in output:\n{output}")
     literal = m.group(1).strip()
     return ast.literal_eval(literal)
+
+
+def _run_timed(module_text: str, tools: Toolchain) -> float:
+    """Lower an already-fully-formed module (no attention-opt passes applied)
+    straight to LLVM, JIT-execute it, and return the elapsed seconds printed
+    by the module's own rtclock()/printF64() timing (see bench_codegen.py)."""
+    lowered = _run([str(tools.mlir_opt), "-", *_LOWER_FLAGS], stdin=module_text)
+
+    shared_libs_arg = "--shared-libs=" + ",".join(str(p) for p in tools.shared_libs)
+    output = _run(
+        [str(tools.mlir_runner), "-", "-e", "main", "-entry-point-result=void",
+         shared_libs_arg],
+        stdin=lowered,
+    )
+    try:
+        return float(output.strip())
+    except ValueError as e:
+        raise RuntimeError(f"Could not parse timing output:\n{output}") from e
+
+
+def run_baseline_timed(module_text: str, tools: Toolchain) -> float:
+    """Lower+run a bench_codegen.emit_baseline_module output (no attention-opt
+    passes -- it's the naive unfused baseline). Returns total elapsed seconds
+    for the timed loop (not divided by iteration count)."""
+    return _run_timed(module_text, tools)
+
+
+def run_fused_timed(module_text: str, tile_size: int, tools: Toolchain) -> float:
+    """Run fusion+tiling on a bench_codegen.emit_fused_input_module output,
+    then lower+run. Returns total elapsed seconds for the timed loop (not
+    divided by iteration count)."""
+    fused_tiled = _run(
+        [str(tools.attention_opt), "-",
+         "--fusion-pass", f"--tiling-pass=tile-size={tile_size}"],
+        stdin=module_text,
+    )
+    return _run_timed(fused_tiled, tools)

@@ -12,7 +12,14 @@ the 5-op unfused pattern FusionPass matches (see test/Attention/fusion.mlir):
 `@main` wraps it with concrete `memref.global` constant inputs, calls it, and
 prints the output via `printMemrefF32` (from mlir_c_runner_utils) so the
 result can be captured from stdout and parsed by pipeline.py.
+
+The shape/global/function-text helpers here are also reused by
+bench_codegen.py to build the CPU benchmarking modules, so that the fused
+input IR fed to the benchmark is byte-for-byte the same pattern the
+numerical-correctness harness already validated.
 """
+
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -30,27 +37,97 @@ def _mlir_type(shape: tuple[int, ...], elem: str) -> str:
     return "memref<" + "x".join(str(d) for d in shape) + "x" + elem + ">"
 
 
-def emit_module(Q: np.ndarray, K: np.ndarray, V: np.ndarray, scale: float,
-                 mask: np.ndarray | None = None) -> str:
+@dataclass
+class Shapes:
+    seq_q: int
+    seq_k: int
+    head_dim: int
+    has_mask: bool
+
+    @property
+    def qkT(self) -> str:
+        return _mlir_type((self.seq_q, self.seq_k), "f32")
+
+    @property
+    def qT(self) -> str:
+        return _mlir_type((self.seq_q, self.head_dim), "f32")
+
+    @property
+    def kT(self) -> str:
+        return _mlir_type((self.seq_k, self.head_dim), "f32")
+
+    @property
+    def outT(self) -> str:
+        return _mlir_type((self.seq_q, self.head_dim), "f32")
+
+    @property
+    def maskT(self) -> str:
+        return _mlir_type((self.seq_q, self.seq_k), "i1")
+
+    @property
+    def call_sig_types(self) -> str:
+        mask_part = f", {self.maskT}" if self.has_mask else ""
+        return f"({self.qT}, {self.kT}, {self.kT}, f32{mask_part}, {self.outT}) -> ()"
+
+
+def shapes_of(Q: np.ndarray, K: np.ndarray, V: np.ndarray,
+              mask: np.ndarray | None) -> Shapes:
     seq_q, head_dim = Q.shape
     seq_k, _ = K.shape
     assert K.shape == V.shape == (seq_k, head_dim)
     if mask is not None:
         assert mask.shape == (seq_q, seq_k)
+    return Shapes(seq_q, seq_k, head_dim, mask is not None)
 
-    qkT = _mlir_type((seq_q, seq_k), "f32")
-    qT = _mlir_type((seq_q, head_dim), "f32")
-    kT = _mlir_type((seq_k, head_dim), "f32")
-    outT = _mlir_type((seq_q, head_dim), "f32")
-    maskT = _mlir_type((seq_q, seq_k), "i1")
 
-    mask_arg = f",\n    %mask   : {maskT}" if mask is not None else ""
-    mask_alloc = f"\n  %mk = memref.alloc() : {qkT}" if mask is not None else ""
-    mask_dealloc = f"\n  memref.dealloc %mk : {qkT}" if mask is not None else ""
+def globals_block(Q: np.ndarray, K: np.ndarray, V: np.ndarray,
+                   mask: np.ndarray | None, s: Shapes) -> str:
+    """memref.global constant declarations for Q, K, V, and (optionally) mask."""
+    mask_global = ""
+    if mask is not None:
+        mask_global = (
+            f'\n  memref.global "private" constant @Mask_data : {s.maskT} '
+            f"= dense<{_format_dense(mask)}>"
+        )
+    return (
+        f'  memref.global "private" constant @Q_data : {s.qT} = dense<{_format_dense(Q)}>\n'
+        f'  memref.global "private" constant @K_data : {s.kT} = dense<{_format_dense(K)}>\n'
+        f'  memref.global "private" constant @V_data : {s.kT} = dense<{_format_dense(V)}>'
+        f"{mask_global}"
+    )
+
+
+def load_globals_block(s: Shapes, scale: float) -> str:
+    """Statements loading Q/K/V/mask/scale from globals into SSA values,
+    matching the names used by `call_args_text`."""
+    mask_load = f"\n    %mask = memref.get_global @Mask_data : {s.maskT}" if s.has_mask else ""
+    return (
+        f"    %Q = memref.get_global @Q_data : {s.qT}\n"
+        f"    %K = memref.get_global @K_data : {s.kT}\n"
+        f"    %V = memref.get_global @V_data : {s.kT}{mask_load}\n"
+        f"    %scale = arith.constant {float(scale)!r} : f32"
+    )
+
+
+def call_args_text(s: Shapes) -> str:
+    mask_arg = ", %mask" if s.has_mask else ""
+    return f"%Q, %K, %V, %scale{mask_arg}"
+
+
+def unfused_func_text(s: Shapes) -> str:
+    """The `@attention_unfused` function body: QK^T -> scale -> mask (optional)
+    -> linalg.softmax -> PV matmul. This is the exact pattern FusionPass
+    matches; it is NOT directly lowerable via --convert-linalg-to-loops
+    (linalg.softmax has no loop lowering), so this text is only ever used as
+    input to attention-opt --fusion-pass --tiling-pass, never executed as-is.
+    """
+    mask_arg = f",\n    %mask   : {s.maskT}" if s.has_mask else ""
+    mask_alloc = f"\n  %mk = memref.alloc() : {s.qkT}" if s.has_mask else ""
+    mask_dealloc = f"\n  memref.dealloc %mk : {s.qkT}" if s.has_mask else ""
 
     mask_generic = ""
     softmax_input = "%sc"
-    if mask is not None:
+    if s.has_mask:
         mask_generic = f"""
   linalg.generic {{
     indexing_maps = [
@@ -59,8 +136,8 @@ def emit_module(Q: np.ndarray, K: np.ndarray, V: np.ndarray, scale: float,
       affine_map<(d0, d1) -> (d0, d1)>
     ],
     iterator_types = ["parallel", "parallel"]
-  }} ins(%sc, %mask : {qkT}, {maskT})
-    outs(%mk      : {qkT}) {{
+  }} ins(%sc, %mask : {s.qkT}, {s.maskT})
+    outs(%mk      : {s.qkT}) {{
   ^bb0(%score : f32, %m : i1, %out : f32):
     %ninf = arith.constant -3.4028235e+38 : f32
     %r    = arith.select %m, %ninf, %score : f32
@@ -68,20 +145,20 @@ def emit_module(Q: np.ndarray, K: np.ndarray, V: np.ndarray, scale: float,
   }}"""
         softmax_input = "%mk"
 
-    unfused_func = f"""
+    return f"""
 func.func @attention_unfused(
-    %Q      : {qT},
-    %K      : {kT},
-    %V      : {kT},
+    %Q      : {s.qT},
+    %K      : {s.kT},
+    %V      : {s.kT},
     %scale  : f32{mask_arg},
-    %output : {outT}) {{
+    %output : {s.outT}) {{
 
-  %qk = memref.alloc() : {qkT}
-  %sc = memref.alloc() : {qkT}{mask_alloc}
-  %p  = memref.alloc() : {qkT}
+  %qk = memref.alloc() : {s.qkT}
+  %sc = memref.alloc() : {s.qkT}{mask_alloc}
+  %p  = memref.alloc() : {s.qkT}
 
   %zero = arith.constant 0.0 : f32
-  linalg.fill ins(%zero : f32) outs(%qk : {qkT})
+  linalg.fill ins(%zero : f32) outs(%qk : {s.qkT})
 
   linalg.generic {{
     indexing_maps = [
@@ -90,8 +167,8 @@ func.func @attention_unfused(
       affine_map<(d0, d1, d2) -> (d0, d1)>
     ],
     iterator_types = ["parallel", "parallel", "reduction"]
-  }} ins(%Q, %K : {qT}, {kT})
-    outs(%qk   : {qkT}) {{
+  }} ins(%Q, %K : {s.qT}, {s.kT})
+    outs(%qk   : {s.qkT}) {{
   ^bb0(%q : f32, %k : f32, %acc : f32):
     %prod = arith.mulf %q, %k : f32
     %sum  = arith.addf %acc, %prod : f32
@@ -104,8 +181,8 @@ func.func @attention_unfused(
       affine_map<(d0, d1) -> (d0, d1)>
     ],
     iterator_types = ["parallel", "parallel"]
-  }} ins(%qk : {qkT})
-    outs(%sc : {qkT}) {{
+  }} ins(%qk : {s.qkT})
+    outs(%sc : {s.qkT}) {{
   ^bb0(%in : f32, %out : f32):
     %r = arith.mulf %in, %scale : f32
     linalg.yield %r : f32
@@ -113,55 +190,42 @@ func.func @attention_unfused(
 {mask_generic}
 
   linalg.softmax dimension(1)
-    ins({softmax_input} : {qkT})
-    outs(%p : {qkT})
+    ins({softmax_input} : {s.qkT})
+    outs(%p : {s.qkT})
 
-  linalg.fill ins(%zero : f32) outs(%output : {outT})
+  linalg.fill ins(%zero : f32) outs(%output : {s.outT})
   linalg.matmul
-    ins(%p, %V   : {qkT}, {kT})
-    outs(%output : {outT})
+    ins(%p, %V   : {s.qkT}, {s.kT})
+    outs(%output : {s.outT})
 
-  memref.dealloc %qk : {qkT}
-  memref.dealloc %sc : {qkT}{mask_dealloc}
-  memref.dealloc %p  : {qkT}
+  memref.dealloc %qk : {s.qkT}
+  memref.dealloc %sc : {s.qkT}{mask_dealloc}
+  memref.dealloc %p  : {s.qkT}
 
   return
 }}
 """
 
-    mask_global = ""
-    mask_call_arg = ""
-    mask_main_load = ""
-    if mask is not None:
-        mask_global = (
-            f'\n  memref.global "private" constant @Mask_data : {maskT} '
-            f"= dense<{_format_dense(mask)}>"
-        )
-        mask_main_load = f"\n    %mask = memref.get_global @Mask_data : {maskT}"
-        mask_call_arg = ", %mask"
 
-    call_sig_types = f"({qT}, {kT}, {kT}, f32{', ' + maskT if mask is not None else ''}, {outT}) -> ()"
+def emit_module(Q: np.ndarray, K: np.ndarray, V: np.ndarray, scale: float,
+                 mask: np.ndarray | None = None) -> str:
+    s = shapes_of(Q, K, V, mask)
 
     module = f"""module {{
-  memref.global "private" constant @Q_data : {qT} = dense<{_format_dense(Q)}>
-  memref.global "private" constant @K_data : {kT} = dense<{_format_dense(K)}>
-  memref.global "private" constant @V_data : {kT} = dense<{_format_dense(V)}>{mask_global}
+{globals_block(Q, K, V, mask, s)}
 
   func.func private @printMemrefF32(memref<*xf32>)
-{unfused_func}
+{unfused_func_text(s)}
   func.func @main() {{
-    %Q = memref.get_global @Q_data : {qT}
-    %K = memref.get_global @K_data : {kT}
-    %V = memref.get_global @V_data : {kT}{mask_main_load}
-    %scale = arith.constant {scale!r} : f32
-    %output = memref.alloc() : {outT}
+{load_globals_block(s, scale)}
+    %output = memref.alloc() : {s.outT}
 
-    call @attention_unfused(%Q, %K, %V, %scale{mask_call_arg}, %output)
-      : {call_sig_types}
+    call @attention_unfused({call_args_text(s)}, %output)
+      : {s.call_sig_types}
 
-    %cast = memref.cast %output : {outT} to memref<*xf32>
+    %cast = memref.cast %output : {s.outT} to memref<*xf32>
     call @printMemrefF32(%cast) : (memref<*xf32>) -> ()
-    memref.dealloc %output : {outT}
+    memref.dealloc %output : {s.outT}
     return
   }}
 }}
