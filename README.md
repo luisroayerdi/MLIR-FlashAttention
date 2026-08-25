@@ -154,6 +154,39 @@ $OPT test/Attention/tiling.mlir --tiling-pass="tile-size=32" 2>/dev/null | \
 
 `FileCheck` is in your LLVM tools directory (e.g. `/opt/homebrew/opt/llvm/bin/FileCheck` on macOS with Homebrew LLVM).
 
+FileCheck only verifies IR *shape* (the right ops appear in the right structure) — it says nothing about whether the numbers produced are correct. That's what the numerical validation harness below is for.
+
+---
+
+## Numerical Validation
+
+`test/numerical/` runs Pass 1 + Pass 2 output through a full lowering-to-LLVM pipeline, JIT-executes it via `mlir-runner`, and compares the result against an independent numpy reference implementation of attention — element-wise, against the tolerances in Requirements.md §5.1 (`max_error < 1e-5`, `mean_error < 1e-6`, `>99.9%` of elements within tolerance).
+
+**Setup (one-time):**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r test/numerical/requirements.txt
+```
+
+**Run the default suite** (small shapes, with and without a causal mask, single-tile and multi-tile):
+
+```bash
+source .venv/bin/activate
+cd test/numerical && python3 validate.py --suite
+```
+
+**Run a single configuration:**
+
+```bash
+python3 test/numerical/validate.py --seq-q 16 --seq-k 16 --head-dim 8 --tile-size 4 --mask
+```
+
+`seq-q` and `seq-k` must be divisible by `tile-size` — `TilingPass` does not yet handle remainder tiles (see TRADEOFFS.md). There is currently no batch dimension in `attention.fused`, so each run validates one `[seq, head_dim]` case at a time.
+
+The tool paths (`attention-opt`, `mlir-opt`, `mlir-runner`, runner-utils shared libs) are auto-discovered from `build/CMakeCache.txt` — no configuration needed as long as `build/` has been configured per the Build section above.
+
 ---
 
 ## Project Documents
@@ -203,4 +236,4 @@ Current entries cover: why V is in `attention.fused`, why scale is an SSA operan
 | 4 — Mask Specialization | `--mask-specialization-pass` | Not yet implemented |
 | 5 — GPU Lowering | `--gpu-lowering-pass` | Deferred (requires GPU hardware) |
 
-Current milestone: CPU correctness validation (Passes 1–2 producing correct IR). Next step: numerical validation against PyTorch, then Pass 3.
+Current milestone: numerical validation (Requirements.md §5.1) passing for Passes 1–2 on small shapes (`test/numerical/`, 5/5 default-suite configs, masked and unmasked). Next step: CPU execution benchmarking (§5.2 — speedup vs. unfused baseline), then Pass 3.

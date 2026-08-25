@@ -235,3 +235,77 @@ load them before the pass runs."
 **Cost:** Each pass must be kept in sync with the set of dialects it creates
 ops from. Missing a dialect produces a runtime crash rather than a compile-time
 error.
+
+---
+
+## Numerical validation: numpy reference instead of PyTorch
+
+**Decision:** `test/numerical/reference.py` implements attention directly in
+numpy (`(Q @ K.T) * scale`, masked softmax, `P @ V`) rather than calling
+PyTorch.
+
+**Why:** Requirements.md §5.1 specifies PyTorch as the reference, but standard
+scaled-dot-product attention is a fixed, unambiguous formula — a numpy
+implementation is mathematically identical ground truth, and PyTorch was not
+available in the dev environment. Numpy is also sufficient for Minimum Viable
+correctness checking; the actual PyTorch *baseline* (unfused, wall-clock timed,
+§6.1) is a separate, later concern from correctness validation and does need
+real PyTorch when that work starts.
+
+**Cost:** If a PyTorch-specific numerical quirk (e.g. its softmax's exact
+reduction order) ever mattered, this reference wouldn't catch it. Not expected
+to matter for standard attention.
+
+---
+
+## Numerical validation: execution via mlir-runner + explicit lowering pipeline
+
+**Decision:** `test/numerical/pipeline.py` runs `attention-opt --fusion-pass
+--tiling-pass`, pipes the result through a fixed sequence of eleven `mlir-opt`
+conversion passes down to the `llvm` dialect, then JIT-executes it with
+`mlir-runner` (this LLVM build's name for `mlir-cpu-runner`) linked against
+`libmlir_runner_utils`/`libmlir_c_runner_utils`, and parses the
+`printMemrefF32` stdout dump back into a numpy array via `ast.literal_eval`.
+
+**Why:** MLIR Python bindings are not enabled in this LLVM build
+(`MLIR_ENABLE_BINDINGS_PYTHON=0`), so there is no in-process way to hand numpy
+arrays to the JIT and get numpy arrays back. Piping through the command-line
+tools and parsing the pretty-printed memref dump is the only path available
+without rebuilding LLVM.
+
+**The pass order matters and was found empirically:** `--convert-linalg-to-loops
+--lower-affine --convert-scf-to-cf --expand-strided-metadata --lower-affine
+--convert-cf-to-llvm --convert-arith-to-llvm --convert-math-to-llvm
+--finalize-memref-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts`.
+Two subtleties: `--expand-strided-metadata` (needed to lower the
+`memref.subview` ops the tiling pass emits for tile slicing) itself emits new
+`affine.apply`/`arith` ops, so `--lower-affine` must run a second time *after*
+it, and `--convert-arith-to-llvm` must come after that second `--lower-affine`
+rather than alongside the first batch of conversions.
+
+**Cost:** The harness depends on the exact print format of `printMemrefF32`
+(`"data = \n" + Python-list-like literal`), which is undocumented/internal to
+MLIR's runner-utils library and could change between LLVM versions. Tool paths
+are discovered from `build/CMakeCache.txt`'s `MLIR_DIR` rather than hardcoded.
+
+---
+
+## Numerical validation: test scope excludes batch dimension and non-tile-divisible shapes
+
+**Decision:** `test/numerical/validate.py`'s default suite uses small,
+single-batch (`[seq, head_dim]`, no batch axis), tile-divisible shapes
+(seq lengths 4–16, tile sizes 4–8), not the full Requirements.md §5.1 matrix
+(seq lengths up to 4096, batch sizes up to 32).
+
+**Why:** `attention.fused`/the fusion pattern operate on 2-D `memref<seq x
+head_dim>` — there is no batch dimension in the IR today (would need an outer
+loop or a 3-D memref convention, neither implemented). Separately, `TilingPass`
+only supports shapes evenly divisible by `tile-size` (see "Tiling pass: static
+shapes only" above) — a non-divisible `seq_q`/`seq_k` silently drops the
+remainder rather than erroring, so `validate.py` raises instead of silently
+testing something incorrect.
+
+**Cost:** This harness proves Pass 1+2 correctness for the shapes it covers,
+but does not yet exercise the full production-scale matrix (large sequence
+lengths, batching, non-divisible remainders). Batching and remainder handling
+remain open work items, not just testing gaps.
