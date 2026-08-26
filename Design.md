@@ -657,6 +657,45 @@ python3 test/numerical/validate.py --seq-len=256 --batch=1 --head-dim=64
 
 **Performance benchmarking on CPU is intentionally not a goal** — the hardware target is GPU. CPU testing validates behavioral correctness only.
 
+*(§8.2 above is illustrative — see §8.2.1 for the as-built Phase 2 testing this project actually runs, including CPU speedup measurement, which the project has in practice not treated as out of scope.)*
+
+### 8.2.1 Phase 2: Integration & CPU Testing (as-built)
+
+Requirements.md §9.2 frames Phase 2 ("Integration tests", "CPU benchmarks",
+"CHECKPOINT: CPU validation must pass") as the step after all four Phase 1
+passes exist. As-built, this project ran numerical/CPU-speedup validation
+incrementally per-pass (§4–§7 tradeoffs already reference each pass's own
+`test/numerical/` results) rather than deferring it to a single batch step —
+so what remained for Phase 2, once Pass 4 was done, was specifically
+*cross-pass* integration coverage: verifying all four passes compose
+correctly in one pipeline invocation, not just pairwise.
+
+**IR-level integration test** — `test/Attention/integration.mlir` starts
+from the raw unfused 5-op sequence (unlike the other per-pass test files,
+which start from pre-fused or pre-tiled input) and runs the complete
+`--fusion-pass --tiling-pass --vectorization-pass --mask-specialization-pass`
+pipeline in one invocation, checking that `linalg.softmax`/`attention.fused`
+are gone, the K-loop body is vectorized (`vector.transfer_read` present),
+and the mask-specialization dispatch (`affine.if`) wraps the vectorized
+BOUNDARY branch's still-scalar `arith.select` correctly.
+
+**Numerical integration** — already covered before this subsection was
+written: `validate.py --suite --vectorize --mask-specialize` runs the
+complete pipeline (Pass 3 and Pass 4 flags compose in `pipeline.py`'s
+`run_module`) and passes 5/5 with error magnitudes identical to every
+narrower combination.
+
+**CPU benchmark: the §5.4 Go/No-Go checkpoint** — `benchmark.py
+--full-pipeline` is the new addition: it benchmarks the complete four-pass
+pipeline against the unfused baseline, gated at Requirements.md §5.4's own
+`>1.5x` "PROCEED" threshold (not §5.2's `>1.2x`, which Passes 1–2 alone
+already clear) — this is the literal "CHECKPOINT: CPU validation must pass"
+gate before Phase 3 (GPU Lowering) could begin. Because Pass 3 is in the
+mix, it inherits Pass 3's small-scale JIT ceiling (reuses
+`VECTORIZED_SUITE`'s shapes — see TRADEOFFS.md). Result: 3/3 configs pass at
+5.0x–7.6x speedup, comfortably clearing `>1.5x` — the masked config benefits
+from both Pass 3 and Pass 4 together and shows the largest speedup (7.6x).
+
 ### 8.3 GPU Testing (Deferred)
 
 When HPCC/cloud GPU is available:

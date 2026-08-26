@@ -176,6 +176,11 @@ $OPT test/Attention/vectorization.mlir --tiling-pass="tile-size=32" --vectorizat
 # Pass 4: verify the masked K-loop body is wrapped in a two-level affine.if
 $OPT test/Attention/mask_specialization.mlir --tiling-pass="tile-size=32" --mask-specialization-pass 2>/dev/null | \
   FileCheck test/Attention/mask_specialization.mlir && echo "PASS"
+
+# Integration: all four passes together, starting from raw unfused input
+$OPT test/Attention/integration.mlir --fusion-pass --tiling-pass="tile-size=32" \
+  --vectorization-pass --mask-specialization-pass 2>/dev/null | \
+  FileCheck test/Attention/integration.mlir && echo "PASS"
 ```
 
 `FileCheck` is in your LLVM tools directory (e.g. `/opt/homebrew/opt/llvm/bin/FileCheck` on macOS with Homebrew LLVM).
@@ -203,6 +208,7 @@ source .venv/bin/activate
 cd test/numerical && python3 validate.py --suite
 python3 validate.py --suite --vectorize   # same suite, also through Pass 3
 python3 validate.py --suite --mask-specialize   # same suite, also through Pass 4
+python3 validate.py --suite --vectorize --mask-specialize   # all four passes together
 ```
 
 **Run a single configuration:**
@@ -225,6 +231,8 @@ The tool paths (`attention-opt`, `mlir-opt`, `mlir-runner`, runner-utils shared 
 
 Pass 4's own Requirements.md §4.4 performance target ("1.15-1.3x vs generic masking") is a *different* comparison — Pass 1+2 generic per-element masking vs. Pass 1+2+4 specialized masking, not vs. the unfused baseline. `--mask-specialize` switches `benchmark.py` to that comparison entirely (always uses a causal mask; `--vectorize` is ignored if both are passed).
 
+`--full-pipeline` is a third mode (overrides both of the above): benchmarks all four passes together against the unfused baseline, gated at Requirements.md §5.4's own Go/No-Go `>1.5x` threshold instead of §5.2's `>1.2x` — this is the literal Phase 2 (§9.2) "CHECKPOINT: CPU validation must pass" gate for the complete Phase 1 pipeline.
+
 It also re-runs the numerical correctness check (`validate.run_case`) for the same shape before timing — per §5.2's "if fails: STOP, do not proceed to GPU" rule, a config that isn't numerically correct is reported as failed without being benchmarked.
 
 **Run the default suite** (seq lengths 128–512, head_dim 64, tile 32, with and without a causal mask):
@@ -234,6 +242,7 @@ source .venv/bin/activate
 cd test/numerical && python3 benchmark.py --suite
 python3 benchmark.py --suite --vectorize        # uses a smaller suite -- see caveat below
 python3 benchmark.py --suite --mask-specialize  # generic-vs-specialized masking comparison
+python3 benchmark.py --suite --full-pipeline    # all four passes vs. unfused, >1.5x Go/No-Go gate
 ```
 
 **Run a single configuration:**
@@ -242,13 +251,14 @@ python3 benchmark.py --suite --mask-specialize  # generic-vs-specialized masking
 python3 test/numerical/benchmark.py --seq-q 512 --seq-k 512 --head-dim 64 --tile-size 32 --trials 5
 python3 test/numerical/benchmark.py --seq-q 64 --seq-k 64 --head-dim 16 --tile-size 16 --trials 5 --vectorize
 python3 test/numerical/benchmark.py --seq-q 512 --seq-k 512 --head-dim 64 --tile-size 32 --trials 5 --mask-specialize
+python3 test/numerical/benchmark.py --seq-q 64 --seq-k 64 --head-dim 16 --tile-size 16 --trials 5 --full-pipeline
 ```
 
-**`--vectorize` scale caveat:** `--suite --vectorize` runs a separate, smaller `VECTORIZED_SUITE` (`tile-size` 8–16, `head-dim` 16), not `DEFAULT_SUITE`. Full-tile vectorization (Design.md §5.2) has no hardware-width chunking, so JIT compile time blows up once `tile_size² × head_dim` exceeds ~4,096 — this includes `DEFAULT_SUITE`'s own `tile=32`/`head_dim=64` production-scale config. Don't pass `--tile-size 32 --head-dim 64 --vectorize` for a single-case run either — it will hang (multi-minute, multi-GB RSS) rather than error. See TRADEOFFS.md.
+**`--vectorize` / `--full-pipeline` scale caveat:** both use a separate, smaller `VECTORIZED_SUITE` (`tile-size` 8–16, `head-dim` 16), not `DEFAULT_SUITE`. Full-tile vectorization (Design.md §5.2) has no hardware-width chunking, so JIT compile time blows up once `tile_size² × head_dim` exceeds ~4,096 — this includes `DEFAULT_SUITE`'s own `tile=32`/`head_dim=64` production-scale config. Don't pass `--tile-size 32 --head-dim 64` with either flag for a single-case run either — it will hang (multi-minute, multi-GB RSS) rather than error. See TRADEOFFS.md.
 
 Requirements.md §5.2 also calls for `perf stat -e cycles,instructions,cache-misses` profiling — that's Linux-only and unavailable on macOS, so this harness reports wall-clock speedup only (the actual quantity the acceptance gate checks). See TRADEOFFS.md.
 
-**Current result:** all 4 default-suite configs pass (Pass 1–2, no vectorization), with measured speedups of 1.36x–1.49x — comfortably clearing the §5.2 `>1.2x` threshold and approaching the §5.4 `>1.5x` Go/No-Go bar for GPU work. With `--vectorize` (Pass 1–2–3, small scale — see caveat above), all 3 `VECTORIZED_SUITE` configs pass at 4.8x–6.5x speedup, clearing Pass 3's own §4.3 "1.5-2x vs scalar" target. With `--mask-specialize` (Pass 1–2 vs. Pass 1–2–4, `tile=32`/`head_dim=64`, no scale caveat here since Pass 4 doesn't vectorize anything), both `MASK_SPEC_SUITE` configs pass at 1.77x–1.87x speedup vs. generic masking — comfortably clearing Pass 4's own §4.4 "1.15-1.3x" target.
+**Current result:** all 4 default-suite configs pass (Pass 1–2, no vectorization), with measured speedups of 1.36x–1.49x — comfortably clearing the §5.2 `>1.2x` threshold. With `--vectorize` (Pass 1–2–3, small scale — see caveat above), all 3 `VECTORIZED_SUITE` configs pass at 4.8x–6.5x speedup, clearing Pass 3's own §4.3 "1.5-2x vs scalar" target. With `--mask-specialize` (Pass 1–2 vs. Pass 1–2–4, `tile=32`/`head_dim=64`, no scale caveat here since Pass 4 doesn't vectorize anything), both `MASK_SPEC_SUITE` configs pass at 1.77x–1.87x speedup vs. generic masking — comfortably clearing Pass 4's own §4.4 "1.15-1.3x" target. With `--full-pipeline` (all four passes, small scale), all 3 `VECTORIZED_SUITE` configs pass at 5.0x–7.6x speedup — clearing the §5.4 `>1.5x` Go/No-Go bar for proceeding to GPU work.
 
 ---
 
@@ -285,7 +295,7 @@ Key sections:
 
 Updated continuously as implementation reveals decisions not fully resolved by Design.md. Each entry records what was decided, why, and what it costs. This is the right place to look when the code does something that seems surprising relative to the design.
 
-Current entries cover: why V is in `attention.fused`, why scale is an SSA operand, the memref-based pattern matching strategy, how the scale value is extracted from the linalg.generic body, why the tiling pass fully expands rather than tiling-in-place, dialect loading requirements, two Pass 3 vectorizer gotchas (the `linalg::vectorize()` erase requirement and `i1`-memref vectorization corrupting masked results), and Pass 4's inline-cloning design plus its unverified causal-mask precondition.
+Current entries cover: why V is in `attention.fused`, why scale is an SSA operand, the memref-based pattern matching strategy, how the scale value is extracted from the linalg.generic body, why the tiling pass fully expands rather than tiling-in-place, dialect loading requirements, two Pass 3 vectorizer gotchas (the `linalg::vectorize()` erase requirement and `i1`-memref vectorization corrupting masked results), Pass 4's inline-cloning design plus its unverified causal-mask precondition, and why the Phase 2 `--full-pipeline` Go/No-Go benchmark inherits Pass 3's small-scale JIT ceiling.
 
 ---
 
@@ -299,6 +309,6 @@ Current entries cover: why V is in `attention.fused`, why scale is an SSA operan
 | 4 — Mask Specialization | `--mask-specialization-pass` | ✅ Implemented, FileCheck + numerically validated + CPU-speedup validated |
 | 5 — GPU Lowering | `--gpu-lowering-pass` | Deferred (requires GPU hardware) |
 
-Current milestone: all four Phase 1 "Core FA1 Passes" (Requirements.md §9.2) are implemented and validated — CPU Validation checkpoint (§5.2) passing, numerical correctness (§5.1) and CPU execution speedup both hold for Passes 1–2 (`test/numerical/`, 4/4 default-suite benchmark configs, 1.36x–1.49x speedup vs. unfused), Pass 3 (`--vectorize`, 5/5 numerical configs, 3/3 small-scale benchmark configs at 4.8x–6.5x speedup — see the scale caveat below), and Pass 4 (`--mask-specialize`, 5/5 default-suite numerical configs plus two ad hoc larger tile grids, 2/2 benchmark configs at 1.77x–1.87x speedup vs. generic masking). Minimum Viable success criteria (§2) are met, and both Pass 3's §4.3 ("vectorized matches scalar" / "1.5-2x throughput") and Pass 4's §4.4 ("1.15-1.3x vs generic masking") own performance targets are cleared. See Design.md §5–6 for the as-built approach of each (Pass 3 drives MLIR's built-in `linalg::vectorize` rather than a hand-rolled VF/remainder scheme; Pass 4 builds inline `affine.if`/`IntegerSet` dispatch with block cloning rather than outlined kernel functions) and TRADEOFFS.md for real bugs found and fixed along the way (Pass 3: a `linalg::vectorize()` erase gotcha, and `i1`/mask-memref vectorization producing wrong results; Pass 4: an unverified-but-documented precondition that specialization is only correct for an actually-causal mask). Next step: Phase 2 integration/CPU testing per §9.2, then Pass 5 (GPU Lowering) once hardware is available.
+Current milestone: Requirements.md §9.2's Phase 1 ("Core FA1 Passes") and Phase 2 ("Integration & CPU Testing") are both complete. All four passes are implemented and validated individually — numerical correctness (§5.1) and CPU speedup hold for Passes 1–2 (`test/numerical/`, 4/4 default-suite benchmark configs, 1.36x–1.49x speedup vs. unfused), Pass 3 (`--vectorize`, 5/5 numerical configs, 3/3 small-scale benchmark configs at 4.8x–6.5x speedup — see the scale caveat below), and Pass 4 (`--mask-specialize`, 5/5 default-suite numerical configs plus two ad hoc larger tile grids, 2/2 benchmark configs at 1.77x–1.87x speedup vs. generic masking) — and together: `test/Attention/integration.mlir` FileCheck-verifies all four passes compose in one pipeline invocation starting from raw unfused input, `validate.py --suite --vectorize --mask-specialize` passes 5/5 numerically, and `benchmark.py --full-pipeline` — the literal §9.2 Phase 2 "CHECKPOINT: CPU validation must pass" / §5.4 Go/No-Go gate — clears the `>1.5x` threshold at 5.0x–7.6x speedup (small scale, see caveat below). Minimum Viable success criteria (§2) are met, and Pass 3's §4.3 and Pass 4's §4.4 own performance targets are both cleared. See Design.md §5–6 for the as-built approach of each pass (Pass 3 drives MLIR's built-in `linalg::vectorize` rather than a hand-rolled VF/remainder scheme; Pass 4 builds inline `affine.if`/`IntegerSet` dispatch with block cloning rather than outlined kernel functions) and §8.2.1 for the as-built Phase 2 integration work; TRADEOFFS.md records real bugs found and fixed along the way (Pass 3: a `linalg::vectorize()` erase gotcha, and `i1`/mask-memref vectorization producing wrong results; Pass 4: an unverified-but-documented precondition that specialization is only correct for an actually-causal mask). Next step: Phase 3, Pass 5 (GPU Lowering), once GPU hardware is available — currently blocked.
 
 **Pass 3 CPU-benchmark scale caveat:** full-tile vectorization (no hardware-width chunking — see Design.md §5.2) makes JIT compile time blow up once `tile_size² × head_dim` exceeds ~4,096 — which includes Pass 1–2's own production-scale `tile=32`/`head_dim=64` benchmark config. `benchmark.py --vectorize --suite` therefore runs a separate, smaller `VECTORIZED_SUITE` rather than `DEFAULT_SUITE`; see TRADEOFFS.md "Vectorization pass: full-tile vectorization does not scale to CPU JIT compilation at production tile sizes" for the measured cliff and the fix (deferred as future work).

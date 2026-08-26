@@ -36,6 +36,7 @@ from pipeline import Toolchain, run_baseline_timed, run_fused_timed
 from validate import run_case
 
 SPEEDUP_THRESHOLD = 1.2  # Requirements.md 5.2 acceptance criterion
+GO_NO_GO_THRESHOLD = 1.5  # Requirements.md 5.4 Go/No-Go "PROCEED if >1.5x speedup vs unfused"
 MASK_SPEC_SPEEDUP_THRESHOLD = 1.15  # Requirements.md 4.4 "1.15-1.3x vs generic masking"
 VARIANCE_WARN_FRACTION = 0.05  # Requirements.md 5.3 "flag variance >5%"
 
@@ -54,19 +55,27 @@ def _trial_times(module_fn, run_fn, trials: int, timed_iters: int) -> list[float
 def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
                 seed: int, use_mask: bool, tools: Toolchain,
                 trials: int = 5, warmup_iters: int = 5,
-                timed_iters: int = 50, vectorize: bool = False) -> bool:
+                timed_iters: int = 50, vectorize: bool = False,
+                mask_specialize: bool = False,
+                threshold: float = SPEEDUP_THRESHOLD) -> bool:
     if seq_q % tile_size or seq_k % tile_size:
         raise ValueError(
             f"seq_q ({seq_q}) and seq_k ({seq_k}) must be divisible by "
             f"tile_size ({tile_size}); TilingPass only supports full tiles."
         )
 
+    tags = []
+    if vectorize:
+        tags.append("vectorized")
+    if mask_specialize:
+        tags.append("mask-specialized")
     label = (f"seq_q={seq_q} seq_k={seq_k} head_dim={head_dim} "
              f"tile={tile_size} mask={use_mask}"
-             f"{' vectorized' if vectorize else ''}")
+             f"{' ' + ','.join(tags) if tags else ''}")
 
     correct = run_case(seq_q, seq_k, head_dim, tile_size, seed, use_mask,
-                        tools, verbose=False, vectorize=vectorize)
+                        tools, verbose=False, vectorize=vectorize,
+                        mask_specialize=mask_specialize)
     if not correct:
         print(f"FAIL  {label}: numerical correctness check failed "
               f"(see validate.py) -- skipping timing, per 5.2 'STOP' rule")
@@ -87,7 +96,8 @@ def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
         )
         fused_times = _trial_times(
             lambda: emit_fused_input_module(Q, K, V, scale, mask, warmup_iters, timed_iters),
-            lambda m: run_fused_timed(m, tile_size, tools, vectorize=vectorize),
+            lambda m: run_fused_timed(m, tile_size, tools, vectorize=vectorize,
+                                       mask_specialize=mask_specialize),
             trials, timed_iters,
         )
     except RuntimeError as e:
@@ -100,7 +110,7 @@ def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
     fused_stdev = statistics.stdev(fused_times) if trials > 1 else 0.0
     speedup = base_med / fused_med
 
-    ok = speedup > SPEEDUP_THRESHOLD
+    ok = speedup > threshold
 
     variance_note = ""
     for name, med, sd in (("baseline", base_med, base_stdev), ("fused", fused_med, fused_stdev)):
@@ -111,7 +121,7 @@ def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
     print(f"{status}  {label}  "
           f"baseline={base_med * 1e6:.2f}us (+/-{base_stdev * 1e6:.2f})  "
           f"fused={fused_med * 1e6:.2f}us (+/-{fused_stdev * 1e6:.2f})  "
-          f"speedup={speedup:.3f}x (need >{SPEEDUP_THRESHOLD}x){variance_note}")
+          f"speedup={speedup:.3f}x (need >{threshold}x){variance_note}")
     return ok
 
 
@@ -209,6 +219,14 @@ VECTORIZED_SUITE = [
     (32, 32, 16, 8, True),
 ]
 
+# --full-pipeline --suite: Requirements.md 9.2 Phase 2 "CPU benchmarks" /
+# 5.4 Go/No-Go checkpoint, run against the complete Phase 1 pipeline (Pass
+# 1+2+3+4 together) rather than any single pass in isolation. Reuses
+# VECTORIZED_SUITE's shapes/scale (Pass 3 is in the mix, so the same JIT
+# scale ceiling applies -- see that suite's comment); its one masked config
+# also exercises Pass 4.
+FULL_PIPELINE_SUITE = VECTORIZED_SUITE
+
 # --mask-specialize --suite uses this suite (via bench_mask_specialization_case,
 # which always uses a causal mask -- there is nothing to specialize otherwise).
 # Larger tile grids than DEFAULT_SUITE's masked config (8x8 tiles at seq=256)
@@ -240,6 +258,13 @@ def main() -> int:
                               "(Requirements.md 4.4's own speedup target); "
                               "always uses a causal mask; --vectorize is "
                               "ignored if both are passed")
+    parser.add_argument("--full-pipeline", action="store_true",
+                         help="Requirements.md 9.2 Phase 2 / 5.4 Go/No-Go "
+                              "checkpoint: benchmark all four passes together "
+                              "(fusion+tiling+vectorization+mask-specialization) "
+                              "against the unfused baseline, gated at the >1.5x "
+                              "Go/No-Go threshold instead of 5.2's >1.2x; "
+                              "overrides --vectorize/--mask-specialize")
     parser.add_argument("--trials", type=int, default=5,
                          help="independent subprocess trials per config")
     parser.add_argument("--warmup-iters", type=int, default=5)
@@ -255,6 +280,30 @@ def main() -> int:
     except RuntimeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+
+    if args.full_pipeline:
+        if args.suite:
+            results = [
+                bench_case(sq, sk, hd, ts, args.seed, mask, tools,
+                           args.trials, args.warmup_iters, args.timed_iters,
+                           vectorize=True, mask_specialize=True,
+                           threshold=GO_NO_GO_THRESHOLD)
+                for sq, sk, hd, ts, mask in FULL_PIPELINE_SUITE
+            ]
+            n_pass = sum(results)
+            print(f"\n{n_pass}/{len(results)} configs met the "
+                  f">{GO_NO_GO_THRESHOLD}x Go/No-Go threshold")
+            return 0 if all(results) else 1
+
+        seq_q = args.seq_q or 64
+        seq_k = args.seq_k or 64
+        head_dim = args.head_dim or 16
+        tile_size = args.tile_size or 16
+        ok = bench_case(seq_q, seq_k, head_dim, tile_size, args.seed, args.mask,
+                         tools, args.trials, args.warmup_iters, args.timed_iters,
+                         vectorize=True, mask_specialize=True,
+                         threshold=GO_NO_GO_THRESHOLD)
+        return 0 if ok else 1
 
     if args.mask_specialize:
         if args.suite:

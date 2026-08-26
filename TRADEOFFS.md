@@ -651,3 +651,33 @@ the 2x2-grid case in `DEFAULT_SUITE`. `benchmark.py --mask-specialize --suite`
 measures 1.77x-1.87x speedup vs. Pass 1-2's generic per-element masking —
 comfortably past Requirements.md §4.4's own "1.15-1.3x vs generic masking"
 target.
+
+---
+
+## Phase 2 integration: `--full-pipeline` reuses `VECTORIZED_SUITE`'s scale, gated at the §5.4 Go/No-Go threshold
+
+**Decision:** `benchmark.py --full-pipeline` — the Requirements.md §9.2
+Phase 2 / §5.4 Go/No-Go CPU benchmark for all four passes together — is a
+third, separate comparison mode from `--vectorize` and `--mask-specialize`
+(it overrides both), using `bench_case`'s existing unfused-vs-fused
+comparison but with `vectorize=True, mask_specialize=True` forced on and
+the pass/fail bar raised from `SPEEDUP_THRESHOLD` (1.2x, §5.2) to
+`GO_NO_GO_THRESHOLD` (1.5x, §5.4). Its suite is `VECTORIZED_SUITE`
+(`tile-size` 8-16, `head-dim` 16), not `DEFAULT_SUITE`.
+
+**Why:** Requirements.md §5.4's Go/No-Go criteria ("PROCEED if... Performance:
+>1.5x speedup vs unfused") is the literal checkpoint gating whether Phase 3
+(GPU Lowering) can begin — it's a different, stricter bar than §5.2's CPU
+Validation `>1.2x`, and it's specifically about the *complete* pipeline, not
+any single pass. Since Pass 3 is part of "complete," Pass 3's own JIT-scale
+ceiling (`tile_size^2 * head_dim <~4096`, see the vectorization-pass
+scalability entry above) applies here too — there's no way to benchmark the
+full four-pass pipeline at `DEFAULT_SUITE`'s production scale
+(`tile=32`/`head_dim=64`) without hitting the same multi-minute JIT hang.
+
+**Cost:** Same caveat as Pass 3's own benchmark: the Go/No-Go result
+(5.0x-7.6x speedup, comfortably past 1.5x) is only representative at small
+scale. This is now the *second* place (after `VECTORIZED_SUITE` itself) this
+limitation blocks production-scale measurement — closing Pass 3's scaling
+gap (deferred future work, see above) would let this checkpoint run at the
+scale that actually matters for the eventual GPU-lowering decision.
