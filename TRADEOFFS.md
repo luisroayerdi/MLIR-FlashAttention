@@ -379,6 +379,177 @@ repeated calls themselves.
 
 ---
 
+## Vectorization pass: drives MLIR's built-in `linalg::vectorize`, not a hand-rolled VF/remainder scheme
+
+**Decision:** Pass 3 walks the function for the `linalg.generic`/`linalg.fill`/
+`memref.copy` ops `TilingPass` emits and vectorizes each one via
+`mlir::linalg::vectorize` / `mlir::linalg::vectorizeCopy`, using each op's own
+full static iteration-space shape as the vector shape (no `inputVectorSizes`
+override). It does not implement the VF=8/remainder-loop scheme Requirements.md
+§4.3 illustrates.
+
+**Why:** `TilingPass` output has no raw scalar `affine.for`+`memref.load`/
+`memref.store` loops to pattern-match — every tile-body computation is already
+a `linalg.generic` (or `linalg.fill`/`memref.copy`) over a statically-shaped
+tile, which is precisely the input MLIR's own linalg vectorizer targets.
+Hand-rolling VF-chunked rewrites would duplicate logic MLIR already provides
+and battle-tests, for no benefit at this static-shape granularity: since
+`TilingPass` requires tile dimensions to be compile-time constants, there is
+no "leftover" remainder to handle in the first place — the tile size itself
+plays the role Requirements.md's VF does. Design.md §5.2 (original, April
+2026) already anticipated this: "The pass uses `mlir::vectorize`
+infrastructure where available."
+
+**Cost:** The vector ops this pass emits are tile-shaped (e.g.
+`vector<32x32xf32>`), not hardware-register-shaped (`vector<8xf32>`) —
+decomposing to real SIMD width is deferred to downstream
+`--convert-vector-to-scf`/`--convert-vector-to-llvm` passes, which are not yet
+wired into `test/numerical/pipeline.py`'s lowering flags (see below).
+Requirements.md's illustrative IR snippet for this pass is now acknowledged
+as inaccurate for this codebase, matching the precedent set for Passes 1–2.
+
+---
+
+## Vectorization pass: `linalg::vectorize()` requires an explicit `replaceOp` — it doesn't erase the original op
+
+**Decision:** After a successful `linalg::vectorize(rewriter, op)` call, Pass 3
+explicitly calls `rewriter.replaceOp(op, result.replacements)`.
+
+**Why (non-obvious MLIR behavior, found by direct investigation of
+`mlir/lib/Dialect/Linalg/Transforms/Vectorization.cpp`):** `linalg::vectorize`
+builds the `vector.transfer_read`/arithmetic/`vector.transfer_write`
+replacement sequence but leaves erasing/replacing the original op to the
+caller. For a buffer (memref) DPS op — every op in `TilingPass`'s output —
+the op has zero SSA results, so `result.replacements` comes back empty and
+`replaceOp` degrades to a plain erase. Omitting this call was the first
+implementation attempt here: it left the original scalar op in the IR
+*after* the new vector code, silently overwriting the vectorized write with
+an identical scalar recomputation on the very next op. FileCheck for
+`vector.transfer_write` still passed and the numbers would still have been
+correct — the bug was purely "no actual vectorization is happening" — which
+is exactly the kind of thing that would NOT be caught by numerical
+validation alone. Confirmed correct usage against upstream:
+`transform::VectorizeOp` in `LinalgTransformOps.cpp` follows the identical
+`vectorize()` → `rewriter.replaceOp()` pattern.
+
+**Cost:** None — this is the correct/required usage, not a workaround.
+Recorded because the failure mode (silently doing nothing while looking
+correct) is easy to reintroduce if this pass is refactored later.
+
+---
+
+## Vectorization pass: wired into the numerical/benchmark harness via an opt-in `vectorize` flag
+
+**Decision:** `test/numerical/pipeline.py`'s `_LOWER_FLAGS` now always include
+the vector-dialect lowering passes (`--convert-vector-to-scf`,
+`--lower-vector-multi-reduction`, `--convert-vector-to-llvm`,
+`--convert-ub-to-llvm`); `run_module`/`run_fused_timed` take a `vectorize:
+bool` that appends `--vectorization-pass` to the `attention-opt` invocation.
+`validate.py`/`benchmark.py` expose this as a `--vectorize` CLI flag; the
+default suites still run scalar-only by default (matching Pass 1–2's
+existing default behavior), with `--vectorize` re-running the same suite
+through Pass 3 as well.
+
+**Why:** Requirements.md §4.3 requires "Numerical: vectorized matches scalar"
+for this pass, the same bar Pass 1–2 already cleared. Making it opt-in rather
+than replacing the default keeps the existing (already-validated) Pass 1–2
+suite runs untouched while adding equivalent coverage for Pass 3.
+
+**Found empirically extending the lowering pipeline (§5.2's original "not yet
+wired in" note undersold the work involved):** getting vectorized IR to
+JIT-execute at all required three additions beyond what Pass 1–2 needed:
+1. `--convert-vector-to-scf` to break multi-dimensional `vector.transfer_*`
+   ops (e.g. `vector<32x32xf32>`) into loops of hardware-width ones.
+2. `--lower-vector-multi-reduction` — `--convert-vector-to-llvm` alone does
+   **not** lower `vector.multi_reduction` (used for the QK^T/PV
+   matmul-style ops and the row max/sum reductions); it must be lowered to
+   simpler vector ops first, in a separate pass, before `--convert-vector-to-llvm` runs.
+3. `--convert-ub-to-llvm` — `linalg::vectorize()` uses `ub.poison` as the
+   padding value for `vector.transfer_read`. This is legitimate, *heavily
+   used* IR (it seeds `llvm.insertvalue` chains that build up
+   `!llvm.array<N x vectorMxf32>` results — not dead code, despite initially
+   looking like it from a stale intermediate inspection). `mlir-runner`'s
+   registry only calls `registerAllToLLVMIRTranslations`, not full dialect
+   registration, so it cannot even *parse* a leftover `ub.poison`; the `ub`
+   dialect must be fully converted to `llvm.mlir.poison` before handoff.
+
+All three were found by iteratively lowering a concrete vectorized test
+module with `mlir-opt` and reading the resulting parse/verification errors,
+the same empirical methodology TRADEOFFS.md's original 11-flag `_LOWER_FLAGS`
+entry describes.
+
+**Cost:** The lowering pipeline is now 15 flags instead of 11, all always
+applied (verified as no-ops on Pass 1–2's non-vectorized output — see next
+entry). No new cost beyond that; Pass 1–2's existing numerical/CPU-benchmark
+results are unaffected (identical output on the same reference case).
+
+---
+
+## Vectorization pass: `memref<...xi1>` (mask) operands are never vectorized
+
+**Decision:** `VectorizationPass` skips (leaves scalar) any `linalg.generic`/
+`linalg.fill`/`memref.copy` op with an `i1`-element-type memref operand —
+concretely, only the mask-select generic (`arith.select` over the causal
+mask tile).
+
+**Why (found empirically, via the masked-attention numerical suite failing
+with ~1.0 max error while unmasked cases passed at ~1e-6):** `memref<...xi1>`
+stores each boolean as a full byte, but MLIR's `vector<...xi1>` type lowers
+(via `--convert-vector-to-llvm`) to an LLVM `llvm.load : vector<Nxi1>`, whose
+in-memory representation is bit-packed (LLVM's native i1-vector ABI), not
+byte-per-element. Vectorizing the mask-select op reads the mask tile through
+that mismatched layout and produces garbage — this is a known general
+MLIR/LLVM limitation around boolean vectors, not specific to this pass.
+
+**Cost:** The mask-select op remains scalar `linalg.generic` after Pass 3 —
+confirmed correct (5/5 masked+unmasked configs pass numerically, matching
+Pass 1–2's error magnitudes exactly) but not "fully vectorized" in the sense
+Pass 3's summary implies. `test/Attention/vectorization.mlir`'s MASK check
+prefix deliberately does not assert zero remaining `linalg.generic` ops, for
+this reason.
+
+---
+
+## Vectorization pass: full-tile vectorization does not scale to CPU JIT compilation at production tile sizes
+
+**Decision:** `benchmark.py --vectorize --suite` uses a new, separate
+`VECTORIZED_SUITE` (small shapes: `tile-size` 8–16, `head-dim` 16) instead of
+`DEFAULT_SUITE` (`tile-size=32`, `head-dim=64`, the production-scale A100
+config Pass 1–2 already validate against).
+
+**Why (found empirically running the vectorized suite against
+`DEFAULT_SUITE`):** `VectorizationPass` vectorizes each tile op to its own
+full static shape with no decomposition to hardware-width vectors (Design.md
+§5.2's "no manual VF/remainder loop" design decision). The QK^T/PV reduction
+ops lower to an LLVM `!llvm.array<... x vector<...>>` whose flattened element
+count is `tile_size² × head_dim`. Measured JIT behavior against that count:
+
+| tile × tile × head_dim | element count | result |
+|---|---|---|
+| 8×8×16 | 1,024 | fast (seconds), 5.1x speedup |
+| 16×16×16 | 4,096 | fast (seconds), 6.5-7.0x speedup |
+| 16×16×32 | 8,192 | hung — multi-minute, multi-GB RSS, killed rather than waited out |
+| 32×32×64 (`DEFAULT_SUITE`'s tile/head-dim) | 65,536 | hung — same |
+
+The cliff is sharp (between 4,096 and 8,192), consistent with a
+combinatorial (not linear) blowup somewhere in LLVM's handling of large
+flattened array-of-vector aggregates (`insertvalue`/`extractvalue`/
+`shufflevector` chains) during instruction selection/JIT compilation — this
+was not root-caused further (out of scope for this session); the workaround
+was to characterize the safe range empirically rather than fix the
+underlying scaling.
+
+**Cost:** Pass 3's CPU-benchmark evidence (4.8x-6.5x speedup, comfortably
+past the §4.3 "1.5-2x vs scalar" target) is only representative at small
+scale, not at the `tile=32`/`head_dim=64` production scale Pass 1-2's own
+benchmark suite already validates. Closing this gap needs `linalg::vectorize`'s
+`inputVectorSizes` parameter (explicit hardware-width chunking, e.g.
+`vector<8xf32>`, with the remainder handled by the surrounding
+`--convert-vector-to-scf` loop) rather than the current full-tile-shape
+default — deferred as future work, not blocking for Pass 4.
+
+---
+
 ## CPU benchmark: `perf stat` (Requirements.md §5.2) unavailable — wall-clock speedup only
 
 **Decision:** `benchmark.py` reports only wall-clock speedup (baseline

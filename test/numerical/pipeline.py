@@ -11,6 +11,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _LOWER_FLAGS = [
+    # Vector-dialect lowering (no-ops when the input has no vector ops, i.e.
+    # Pass 1+2 output without --vectorization-pass -- see TRADEOFFS.md
+    # "Vectorization pass: wired into the numerical/benchmark harness via an
+    # opt-in `vectorize` flag").
+    "--convert-vector-to-scf",       # multi-dim vector.transfer_* -> loops of 1-D ones
+    "--lower-vector-multi-reduction",  # vector.multi_reduction -> vector.reduction/shuffle
     "--convert-linalg-to-loops",
     "--lower-affine",
     "--convert-scf-to-cf",
@@ -19,6 +25,8 @@ _LOWER_FLAGS = [
     "--convert-cf-to-llvm",
     "--convert-arith-to-llvm",
     "--convert-math-to-llvm",
+    "--convert-vector-to-llvm",
+    "--convert-ub-to-llvm",  # ub.poison (vector.transfer_read padding) -> llvm.mlir.poison
     "--finalize-memref-to-llvm",
     "--convert-func-to-llvm",
     "--reconcile-unrealized-casts",
@@ -77,14 +85,15 @@ def _run(cmd: list[str], stdin: str | None = None) -> str:
     return proc.stdout
 
 
-def run_module(module_text: str, tile_size: int, tools: Toolchain) -> list:
-    """Run fusion+tiling, lower to LLVM, JIT-execute, and return the parsed
-    nested-list output printed by printMemrefF32."""
-    fused_tiled = _run(
-        [str(tools.attention_opt), "-",
-         "--fusion-pass", f"--tiling-pass=tile-size={tile_size}"],
-        stdin=module_text,
-    )
+def run_module(module_text: str, tile_size: int, tools: Toolchain,
+                vectorize: bool = False) -> list:
+    """Run fusion+tiling(+vectorization), lower to LLVM, JIT-execute, and
+    return the parsed nested-list output printed by printMemrefF32."""
+    passes = [str(tools.attention_opt), "-",
+              "--fusion-pass", f"--tiling-pass=tile-size={tile_size}"]
+    if vectorize:
+        passes.append("--vectorization-pass")
+    fused_tiled = _run(passes, stdin=module_text)
 
     lowered = _run([str(tools.mlir_opt), "-", *_LOWER_FLAGS], stdin=fused_tiled)
 
@@ -127,13 +136,14 @@ def run_baseline_timed(module_text: str, tools: Toolchain) -> float:
     return _run_timed(module_text, tools)
 
 
-def run_fused_timed(module_text: str, tile_size: int, tools: Toolchain) -> float:
-    """Run fusion+tiling on a bench_codegen.emit_fused_input_module output,
-    then lower+run. Returns total elapsed seconds for the timed loop (not
-    divided by iteration count)."""
-    fused_tiled = _run(
-        [str(tools.attention_opt), "-",
-         "--fusion-pass", f"--tiling-pass=tile-size={tile_size}"],
-        stdin=module_text,
-    )
+def run_fused_timed(module_text: str, tile_size: int, tools: Toolchain,
+                     vectorize: bool = False) -> float:
+    """Run fusion+tiling(+vectorization) on a bench_codegen.emit_fused_input_module
+    output, then lower+run. Returns total elapsed seconds for the timed loop
+    (not divided by iteration count)."""
+    passes = [str(tools.attention_opt), "-",
+              "--fusion-pass", f"--tiling-pass=tile-size={tile_size}"]
+    if vectorize:
+        passes.append("--vectorization-pass")
+    fused_tiled = _run(passes, stdin=module_text)
     return _run_timed(fused_tiled, tools)

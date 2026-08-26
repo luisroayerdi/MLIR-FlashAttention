@@ -50,4 +50,27 @@ def TilingPass : Pass<"tiling-pass", "::mlir::func::FuncOp"> {
   ];
 }
 
+def VectorizationPass : Pass<"vectorization-pass", "::mlir::func::FuncOp"> {
+  let summary = "Vectorize the scalar linalg ops TilingPass emits into the vector dialect";
+  let description = [{
+    Walks the function for linalg.generic, linalg.fill, and memref.copy ops
+    (the op vocabulary TilingPass emits inside each tile body) and vectorizes
+    each one in place using MLIR's built-in linalg vectorizer
+    (linalg::vectorize / linalg::vectorizeCopy), replacing the scalar
+    element-wise/reduction body with a vector.transfer_read /
+    vector-dialect-arithmetic / vector.transfer_write sequence over the op's
+    full static iteration-space shape.
+
+    This vectorizes each tile "all at once" rather than chunking by a fixed
+    vector width with a scalar remainder loop: since TilingPass already
+    requires static, tile-sized shapes, there is no remainder to handle, and
+    decomposition to hardware-width vectors is left to the standard
+    convert-vector-to-scf / convert-vector-to-llvm lowering passes that run
+    downstream of this one.
+
+    Ops the vectorizer cannot handle are left unchanged; this pass never
+    fails the build over an unvectorizable op.
+  }];
+}
+
 #endif // ATTENTION_PASS

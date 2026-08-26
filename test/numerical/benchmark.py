@@ -53,7 +53,7 @@ def _trial_times(module_fn, run_fn, trials: int, timed_iters: int) -> list[float
 def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
                 seed: int, use_mask: bool, tools: Toolchain,
                 trials: int = 5, warmup_iters: int = 5,
-                timed_iters: int = 50) -> bool:
+                timed_iters: int = 50, vectorize: bool = False) -> bool:
     if seq_q % tile_size or seq_k % tile_size:
         raise ValueError(
             f"seq_q ({seq_q}) and seq_k ({seq_k}) must be divisible by "
@@ -61,10 +61,11 @@ def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
         )
 
     label = (f"seq_q={seq_q} seq_k={seq_k} head_dim={head_dim} "
-             f"tile={tile_size} mask={use_mask}")
+             f"tile={tile_size} mask={use_mask}"
+             f"{' vectorized' if vectorize else ''}")
 
     correct = run_case(seq_q, seq_k, head_dim, tile_size, seed, use_mask,
-                        tools, verbose=False)
+                        tools, verbose=False, vectorize=vectorize)
     if not correct:
         print(f"FAIL  {label}: numerical correctness check failed "
               f"(see validate.py) -- skipping timing, per 5.2 'STOP' rule")
@@ -85,7 +86,7 @@ def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
         )
         fused_times = _trial_times(
             lambda: emit_fused_input_module(Q, K, V, scale, mask, warmup_iters, timed_iters),
-            lambda m: run_fused_timed(m, tile_size, tools),
+            lambda m: run_fused_timed(m, tile_size, tools, vectorize=vectorize),
             trials, timed_iters,
         )
     except RuntimeError as e:
@@ -121,6 +122,25 @@ DEFAULT_SUITE = [
     (256, 256, 64, 32, True),
 ]
 
+# --vectorize --suite uses this smaller suite instead of DEFAULT_SUITE.
+#
+# Why: VectorizationPass vectorizes each tile op to its own full static
+# shape (Design.md 5.2 "no manual VF/remainder loop") -- there is no decomposition
+# to hardware-width vectors before JIT. The array-of-vectors LLVM lowering this
+# produces for the QK^T/PV reduction ops scales with tile_size^2 * head_dim;
+# empirically this is fast up to ~4096 (e.g. tile=16,head_dim=16: 7.0x speedup,
+# completes in seconds) but the JIT hangs (multiple minutes, multi-GB RSS, killed
+# rather than waited out) once it reaches 8192 (tile=16,head_dim=32) or the
+# DEFAULT_SUITE's production scale (tile=32,head_dim=64 => 65536). See
+# TRADEOFFS.md "Vectorization pass: full-tile vectorization does not scale to
+# CPU JIT compilation at production tile sizes".
+VECTORIZED_SUITE = [
+    # (seq_q, seq_k, head_dim, tile_size, use_mask)
+    (32, 32, 16, 8, False),
+    (64, 64, 16, 16, False),
+    (32, 32, 16, 8, True),
+]
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -130,6 +150,9 @@ def main() -> int:
     parser.add_argument("--tile-size", type=int)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--mask", action="store_true", help="use a causal mask")
+    parser.add_argument("--vectorize", action="store_true",
+                         help="also apply --vectorization-pass (Pass 3) to the "
+                              "fused variant being timed")
     parser.add_argument("--trials", type=int, default=5,
                          help="independent subprocess trials per config")
     parser.add_argument("--warmup-iters", type=int, default=5)
@@ -147,10 +170,12 @@ def main() -> int:
         return 2
 
     if args.suite:
+        suite = VECTORIZED_SUITE if args.vectorize else DEFAULT_SUITE
         results = [
             bench_case(sq, sk, hd, ts, args.seed, mask, tools,
-                       args.trials, args.warmup_iters, args.timed_iters)
-            for sq, sk, hd, ts, mask in DEFAULT_SUITE
+                       args.trials, args.warmup_iters, args.timed_iters,
+                       vectorize=args.vectorize)
+            for sq, sk, hd, ts, mask in suite
         ]
         n_pass = sum(results)
         print(f"\n{n_pass}/{len(results)} configs met the >{SPEEDUP_THRESHOLD}x "
@@ -162,7 +187,8 @@ def main() -> int:
     head_dim = args.head_dim or 64
     tile_size = args.tile_size or 32
     ok = bench_case(seq_q, seq_k, head_dim, tile_size, args.seed, args.mask,
-                     tools, args.trials, args.warmup_iters, args.timed_iters)
+                     tools, args.trials, args.warmup_iters, args.timed_iters,
+                     vectorize=args.vectorize)
     return 0 if ok else 1
 
 

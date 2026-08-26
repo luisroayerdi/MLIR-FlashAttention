@@ -110,10 +110,18 @@ $OPT test/Attention/tiling.mlir --tiling-pass="tile-size=32" 2>/dev/null
 
 `attention.fused` expands into nested `affine.for` loops implementing the online softmax algorithm. No `attention.fused` remains — output is standard affine + linalg + memref IR.
 
-### Full pipeline (Fusion → Tiling)
+### Stage 3 — After Pass 3: Vectorization
 
 ```bash
-$OPT test/Attention/fusion.mlir --fusion-pass --tiling-pass="tile-size=32" 2>/dev/null
+$OPT test/Attention/vectorization.mlir --tiling-pass="tile-size=32" --vectorization-pass 2>/dev/null
+```
+
+Every `linalg.generic`/`linalg.fill`/`memref.copy` op inside the tile body becomes a `vector.transfer_read` / vector-dialect-arithmetic / `vector.transfer_write` sequence over the op's own full tile shape (e.g. `vector<32x32xf32>`). No `linalg.generic`, `linalg.fill`, or `memref.copy` remains.
+
+### Full pipeline (Fusion → Tiling → Vectorization)
+
+```bash
+$OPT test/Attention/fusion.mlir --fusion-pass --tiling-pass="tile-size=32" --vectorization-pass 2>/dev/null
 ```
 
 ### See all IR stages in one run
@@ -150,6 +158,10 @@ $OPT test/Attention/fusion.mlir --fusion-pass 2>/dev/null | \
 # Pass 2: verify affine.for loops produced, attention.fused is gone
 $OPT test/Attention/tiling.mlir --tiling-pass="tile-size=32" 2>/dev/null | \
   FileCheck test/Attention/tiling.mlir && echo "PASS"
+
+# Pass 3: verify vector.transfer_read/write produced, no linalg.generic/fill/memref.copy remain
+$OPT test/Attention/vectorization.mlir --tiling-pass="tile-size=32" --vectorization-pass 2>/dev/null | \
+  FileCheck test/Attention/vectorization.mlir && echo "PASS"
 ```
 
 `FileCheck` is in your LLVM tools directory (e.g. `/opt/homebrew/opt/llvm/bin/FileCheck` on macOS with Homebrew LLVM).
@@ -160,7 +172,7 @@ FileCheck only verifies IR *shape* (the right ops appear in the right structure)
 
 ## Numerical Validation
 
-`test/numerical/` runs Pass 1 + Pass 2 output through a full lowering-to-LLVM pipeline, JIT-executes it via `mlir-runner`, and compares the result against an independent numpy reference implementation of attention — element-wise, against the tolerances in Requirements.md §5.1 (`max_error < 1e-5`, `mean_error < 1e-6`, `>99.9%` of elements within tolerance).
+`test/numerical/` runs Pass 1 + Pass 2 output through a full lowering-to-LLVM pipeline, JIT-executes it via `mlir-runner`, and compares the result against an independent numpy reference implementation of attention — element-wise, against the tolerances in Requirements.md §5.1 (`max_error < 1e-5`, `mean_error < 1e-6`, `>99.9%` of elements within tolerance). Add `--vectorize` to also run Pass 3 (`--vectorization-pass`) and validate its output against the same reference.
 
 **Setup (one-time):**
 
@@ -175,12 +187,14 @@ pip install -r test/numerical/requirements.txt
 ```bash
 source .venv/bin/activate
 cd test/numerical && python3 validate.py --suite
+python3 validate.py --suite --vectorize   # same suite, also through Pass 3
 ```
 
 **Run a single configuration:**
 
 ```bash
 python3 test/numerical/validate.py --seq-q 16 --seq-k 16 --head-dim 8 --tile-size 4 --mask
+python3 test/numerical/validate.py --seq-q 16 --seq-k 16 --head-dim 8 --tile-size 4 --mask --vectorize
 ```
 
 `seq-q` and `seq-k` must be divisible by `tile-size` — `TilingPass` does not yet handle remainder tiles (see TRADEOFFS.md). There is currently no batch dimension in `attention.fused`, so each run validates one `[seq, head_dim]` case at a time.
@@ -191,7 +205,7 @@ The tool paths (`attention-opt`, `mlir-opt`, `mlir-runner`, runner-utils shared 
 
 ## CPU Execution Benchmarking
 
-`test/numerical/benchmark.py` implements Requirements.md §5.2 (CPU Validation — the pre-GPU-hardware checkpoint): it times the naive unfused baseline against the Pass 1+2 (fusion+tiling) output, both JIT-executed via `mlir-runner`, and checks the fused version is `>1.2x` faster. Timing is done *inside* the compiled program via `rtclock()`/`printF64()` (bracketing many repeated calls after an untimed warmup loop), so process startup and JIT-compile time don't pollute the measurement. Each config runs several independent trials; results are reported as median ± stdev, with a warning if stdev exceeds 5% of the median.
+`test/numerical/benchmark.py` implements Requirements.md §5.2 (CPU Validation — the pre-GPU-hardware checkpoint): it times the naive unfused baseline against the Pass 1+2 (fusion+tiling) output, both JIT-executed via `mlir-runner`, and checks the fused version is `>1.2x` faster. Timing is done *inside* the compiled program via `rtclock()`/`printF64()` (bracketing many repeated calls after an untimed warmup loop), so process startup and JIT-compile time don't pollute the measurement. Each config runs several independent trials; results are reported as median ± stdev, with a warning if stdev exceeds 5% of the median. Add `--vectorize` to time the Pass 1+2+3 (fusion+tiling+vectorization) output instead of Pass 1+2 alone.
 
 It also re-runs the numerical correctness check (`validate.run_case`) for the same shape before timing — per §5.2's "if fails: STOP, do not proceed to GPU" rule, a config that isn't numerically correct is reported as failed without being benchmarked.
 
@@ -200,17 +214,21 @@ It also re-runs the numerical correctness check (`validate.run_case`) for the sa
 ```bash
 source .venv/bin/activate
 cd test/numerical && python3 benchmark.py --suite
+python3 benchmark.py --suite --vectorize   # uses a smaller suite -- see caveat below
 ```
 
 **Run a single configuration:**
 
 ```bash
 python3 test/numerical/benchmark.py --seq-q 512 --seq-k 512 --head-dim 64 --tile-size 32 --trials 5
+python3 test/numerical/benchmark.py --seq-q 64 --seq-k 64 --head-dim 16 --tile-size 16 --trials 5 --vectorize
 ```
+
+**`--vectorize` scale caveat:** `--suite --vectorize` runs a separate, smaller `VECTORIZED_SUITE` (`tile-size` 8–16, `head-dim` 16), not `DEFAULT_SUITE`. Full-tile vectorization (Design.md §5.2) has no hardware-width chunking, so JIT compile time blows up once `tile_size² × head_dim` exceeds ~4,096 — this includes `DEFAULT_SUITE`'s own `tile=32`/`head_dim=64` production-scale config. Don't pass `--tile-size 32 --head-dim 64 --vectorize` for a single-case run either — it will hang (multi-minute, multi-GB RSS) rather than error. See TRADEOFFS.md.
 
 Requirements.md §5.2 also calls for `perf stat -e cycles,instructions,cache-misses` profiling — that's Linux-only and unavailable on macOS, so this harness reports wall-clock speedup only (the actual quantity the acceptance gate checks). See TRADEOFFS.md.
 
-**Current result:** all 4 default-suite configs pass, with measured speedups of 1.36x–1.48x — comfortably clearing the §5.2 `>1.2x` threshold and approaching the §5.4 `>1.5x` Go/No-Go bar for GPU work.
+**Current result:** all 4 default-suite configs pass (Pass 1–2, no vectorization), with measured speedups of 1.36x–1.49x — comfortably clearing the §5.2 `>1.2x` threshold and approaching the §5.4 `>1.5x` Go/No-Go bar for GPU work. With `--vectorize` (Pass 1–2–3, small scale — see caveat above), all 3 `VECTORIZED_SUITE` configs pass at 4.8x–6.5x speedup, clearing Pass 3's own §4.3 "1.5-2x vs scalar" target.
 
 ---
 
@@ -257,8 +275,10 @@ Current entries cover: why V is in `attention.fused`, why scale is an SSA operan
 |------|------|--------|
 | 1 — Fusion | `--fusion-pass` | ✅ Implemented, FileCheck passing |
 | 2 — Tiling | `--tiling-pass` | ✅ Implemented, FileCheck passing |
-| 3 — Vectorization | `--vectorization-pass` | Not yet implemented |
+| 3 — Vectorization | `--vectorization-pass` | ✅ Implemented, FileCheck + numerically validated + CPU-speedup validated (small scale — see below) |
 | 4 — Mask Specialization | `--mask-specialization-pass` | Not yet implemented |
 | 5 — GPU Lowering | `--gpu-lowering-pass` | Deferred (requires GPU hardware) |
 
-Current milestone: CPU Validation checkpoint (Requirements.md §5.2) passing — numerical correctness (§5.1) and CPU execution speedup (§5.2) both hold for Passes 1–2 (`test/numerical/`, 4/4 default-suite benchmark configs, 1.36x–1.48x speedup vs. unfused). Minimum Viable success criteria (§2) are now met. Next step: Pass 3 (Vectorization).
+Current milestone: CPU Validation checkpoint (Requirements.md §5.2) passing — numerical correctness (§5.1) and CPU execution speedup (§5.2) both hold for Passes 1–2 (`test/numerical/`, 4/4 default-suite benchmark configs, 1.36x–1.49x speedup vs. unfused) **and** Pass 3 (`--vectorize`, 5/5 numerical configs, 3/3 small-scale benchmark configs at 4.8x–6.5x speedup — see the scale caveat below). Minimum Viable success criteria (§2) are now met, and Pass 3's Requirements.md §4.3 "vectorized matches scalar" / "1.5-2x throughput" targets are both cleared. See [Design.md §5](Design.md) for the as-built approach (drives MLIR's built-in `linalg::vectorize` rather than a hand-rolled VF/remainder scheme) and TRADEOFFS.md for two real bugs found and fixed along the way (a `linalg::vectorize()` erase gotcha, and `i1`/mask-memref vectorization producing wrong results). Next step: Pass 4 (Mask Specialization).
+
+**Pass 3 CPU-benchmark scale caveat:** full-tile vectorization (no hardware-width chunking — see Design.md §5.2) makes JIT compile time blow up once `tile_size² × head_dim` exceeds ~4,096 — which includes Pass 1–2's own production-scale `tile=32`/`head_dim=64` benchmark config. `benchmark.py --vectorize --suite` therefore runs a separate, smaller `VECTORIZED_SUITE` rather than `DEFAULT_SUITE`; see TRADEOFFS.md "Vectorization pass: full-tile vectorization does not scale to CPU JIT compilation at production tile sizes" for the measured cliff and the fix (deferred as future work).

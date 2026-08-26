@@ -30,7 +30,8 @@ WITHIN_TOL_FRACTION = 0.999
 
 
 def run_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
-             seed: int, use_mask: bool, tools: Toolchain, verbose: bool = True) -> bool:
+             seed: int, use_mask: bool, tools: Toolchain, verbose: bool = True,
+             vectorize: bool = False) -> bool:
     if seq_q % tile_size or seq_k % tile_size:
         raise ValueError(
             f"seq_q ({seq_q}) and seq_k ({seq_k}) must be divisible by "
@@ -52,10 +53,12 @@ def run_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
     expected = attention_reference(Q, K, V, scale, mask)
 
     module_text = emit_module(Q, K, V, scale, mask)
-    actual = np.array(run_module(module_text, tile_size, tools), dtype=np.float32)
+    actual = np.array(run_module(module_text, tile_size, tools, vectorize=vectorize),
+                       dtype=np.float32)
 
+    tag = f"[vectorized] " if vectorize else ""
     if actual.shape != expected.shape:
-        print(f"FAIL  seq_q={seq_q} seq_k={seq_k} head_dim={head_dim} "
+        print(f"FAIL  {tag}seq_q={seq_q} seq_k={seq_k} head_dim={head_dim} "
               f"tile={tile_size} mask={use_mask}: shape mismatch "
               f"{actual.shape} vs {expected.shape}")
         return False
@@ -70,7 +73,7 @@ def run_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
 
     status = "PASS" if ok else "FAIL"
     if verbose or not ok:
-        print(f"{status}  seq_q={seq_q} seq_k={seq_k} head_dim={head_dim} "
+        print(f"{status}  {tag}seq_q={seq_q} seq_k={seq_k} head_dim={head_dim} "
               f"tile={tile_size} mask={use_mask} seed={seed}  "
               f"max_err={max_error:.3e} mean_err={mean_error:.3e} "
               f"within_tol={within_tol:.4f}")
@@ -95,6 +98,9 @@ def main() -> int:
     parser.add_argument("--tile-size", type=int)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--mask", action="store_true", help="use a causal mask")
+    parser.add_argument("--vectorize", action="store_true",
+                         help="also apply --vectorization-pass (Pass 3) and "
+                              "validate its output against the same reference")
     parser.add_argument("--suite", action="store_true",
                          help="run the default sweep of small configs instead "
                               "of a single case")
@@ -109,7 +115,7 @@ def main() -> int:
 
     if args.suite:
         results = [
-            run_case(sq, sk, hd, ts, args.seed, mask, tools)
+            run_case(sq, sk, hd, ts, args.seed, mask, tools, vectorize=args.vectorize)
             for sq, sk, hd, ts, mask in DEFAULT_SUITE
         ]
         n_pass = sum(results)
@@ -120,7 +126,8 @@ def main() -> int:
     seq_k = args.seq_k or 8
     head_dim = args.head_dim or 4
     tile_size = args.tile_size or 4
-    ok = run_case(seq_q, seq_k, head_dim, tile_size, args.seed, args.mask, tools)
+    ok = run_case(seq_q, seq_k, head_dim, tile_size, args.seed, args.mask, tools,
+                  vectorize=args.vectorize)
     return 0 if ok else 1
 
 
