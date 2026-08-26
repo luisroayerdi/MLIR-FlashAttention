@@ -31,7 +31,7 @@ WITHIN_TOL_FRACTION = 0.999
 
 def run_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
              seed: int, use_mask: bool, tools: Toolchain, verbose: bool = True,
-             vectorize: bool = False) -> bool:
+             vectorize: bool = False, mask_specialize: bool = False) -> bool:
     if seq_q % tile_size or seq_k % tile_size:
         raise ValueError(
             f"seq_q ({seq_q}) and seq_k ({seq_k}) must be divisible by "
@@ -53,10 +53,16 @@ def run_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
     expected = attention_reference(Q, K, V, scale, mask)
 
     module_text = emit_module(Q, K, V, scale, mask)
-    actual = np.array(run_module(module_text, tile_size, tools, vectorize=vectorize),
+    actual = np.array(run_module(module_text, tile_size, tools, vectorize=vectorize,
+                                  mask_specialize=mask_specialize),
                        dtype=np.float32)
 
-    tag = f"[vectorized] " if vectorize else ""
+    tags = []
+    if vectorize:
+        tags.append("vectorized")
+    if mask_specialize:
+        tags.append("mask-specialized")
+    tag = f"[{', '.join(tags)}] " if tags else ""
     if actual.shape != expected.shape:
         print(f"FAIL  {tag}seq_q={seq_q} seq_k={seq_k} head_dim={head_dim} "
               f"tile={tile_size} mask={use_mask}: shape mismatch "
@@ -101,6 +107,10 @@ def main() -> int:
     parser.add_argument("--vectorize", action="store_true",
                          help="also apply --vectorization-pass (Pass 3) and "
                               "validate its output against the same reference")
+    parser.add_argument("--mask-specialize", action="store_true",
+                         help="also apply --mask-specialization-pass (Pass 4, "
+                              "only affects masked configs) and validate its "
+                              "output against the same reference")
     parser.add_argument("--suite", action="store_true",
                          help="run the default sweep of small configs instead "
                               "of a single case")
@@ -115,7 +125,8 @@ def main() -> int:
 
     if args.suite:
         results = [
-            run_case(sq, sk, hd, ts, args.seed, mask, tools, vectorize=args.vectorize)
+            run_case(sq, sk, hd, ts, args.seed, mask, tools, vectorize=args.vectorize,
+                     mask_specialize=args.mask_specialize)
             for sq, sk, hd, ts, mask in DEFAULT_SUITE
         ]
         n_pass = sum(results)
@@ -127,7 +138,7 @@ def main() -> int:
     head_dim = args.head_dim or 4
     tile_size = args.tile_size or 4
     ok = run_case(seq_q, seq_k, head_dim, tile_size, args.seed, args.mask, tools,
-                  vectorize=args.vectorize)
+                  vectorize=args.vectorize, mask_specialize=args.mask_specialize)
     return 0 if ok else 1
 
 

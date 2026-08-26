@@ -566,3 +566,88 @@ scriptable the same way). The actual §5.2 acceptance gate is the wall-clock
 misses avoided, instruction count, etc.) — only that it is. Revisit if/when
 benchmarking moves to a Linux machine or GPU host where `perf`/`ncu` are
 available.
+
+---
+
+## Mask specialization pass: inline `affine.if` + block cloning, not outlined kernel functions
+
+**Decision:** `MaskSpecializationPass` builds the FULL/MASKED/BOUNDARY
+dispatch as `affine.if`/`affine.if...else` directly around cloned/moved
+copies of the K-loop body's existing ops, rather than the outlined
+`@inner_full`/`@inner_boundary` functions Design.md §6.3's original
+pseudocode showed (with inlining left to "a subsequent canonicalization
+step").
+
+**Why:** Outlining would require synthesizing new `func.func` signatures for
+each variant (which operands does each body actually capture? — the K-loop
+body references values from three enclosing scopes: function arguments,
+the Q-loop's tile-local accumulators, and its own induction variables), then
+relying on inlining actually happening downstream to avoid real call
+overhead — none of which this project's pipeline (`test/numerical/
+pipeline.py`'s `_LOWER_FLAGS`) currently guarantees. Building the control
+flow directly with `IRMapping`-based cloning (for FULL) and `Operation::
+moveBefore` (for BOUNDARY, reusing the original ops rather than re-cloning
+them) sidesteps both problems and is less code.
+
+**Cost:** Duplicates the K-loop body's IR (once for the FULL branch, via
+clone) rather than sharing a single outlined definition — for a large tile
+body this means more IR to carry through the rest of the pipeline. Not
+measured as a problem at the tile sizes this project benchmarks (`tile=32`),
+but would be worth revisiting (e.g. `--inline`-friendly outlined functions
+after all) if tile-body size grows significantly (more passes stacking
+per-tile logic) or if binary/compile-time size becomes a concern.
+
+---
+
+## Mask specialization pass: reuses Pass 3's i1-memref identification signature
+
+**Decision:** `MaskSpecializationPass` finds the mask-select op the same way
+`VectorizationPass` finds the op to *exclude* from vectorization: a
+`linalg.generic` with an `i1`-element-type memref among its operands (see
+TRADEOFFS.md "Vectorization pass: `memref<...xi1>` (mask) operands are never
+vectorized"). This is not a shared helper — each pass has its own small
+static function with the identical check.
+
+**Why:** Both passes need to identify the exact same op (the one TilingPass
+emits for "3. Optional mask" — see TilingPass.cpp) for unrelated reasons
+(Pass 3: don't vectorize it; Pass 4: specialize around it), and the check
+is a two-line predicate. Not worth a shared header for this project's size.
+
+**Cost:** If the mask-select op's identifying shape ever changes (e.g.
+TilingPass starts using a different mask representation), both copies need
+updating. Low risk given how small and stable each copy is.
+
+---
+
+## Mask specialization pass: correctness depends entirely on the mask being causal, unverified
+
+**Decision:** `MaskSpecializationPass` classifies every K/V tile as
+FULL/MASKED/BOUNDARY purely from the Q-loop/K-loop induction variables and
+the tile size — it never inspects the mask memref's actual runtime contents.
+
+**Why:** This is the whole point of the optimization (skip work *without*
+reading the mask for FULL/MASKED tiles) — reading the mask to decide whether
+to skip reading the mask would defeat it. Design.md §6.4 already scoped this
+pass to "square causal masks" for exactly this reason; this entry makes the
+consequence explicit.
+
+**Cost:** This is a real, silent correctness risk if the pass is ever applied
+outside this project's own test scope: passing a non-causal boolean mask
+(e.g. a padding mask, a sliding-window mask, an arbitrary sparse pattern) to
+`attention.fused` and then running `--mask-specialization-pass` produces
+wrong results with no diagnostic — the FULL branch would skip masking on
+tiles the actual mask marks as (partially) masked, and the MASKED branch
+would zero out tiles the actual mask allows. Verified safe for every config
+this project's numerical suite covers (all use `np.triu(..., k=1)`, the
+same causal construction `attention_reference` and every test module use).
+Not verified, and not easily verifiable without adding a runtime mask-shape
+check the pass currently has no mechanism for.
+
+**Measurement:** `validate.py --suite --mask-specialize` (5/5, error
+magnitudes identical to the non-specialized masked baseline) and two ad hoc
+larger tile grids (4x4 and 5x5 tiles, `--seq-q 16/20 --tile-size 4`) chosen
+specifically to exercise all three tile classifications together, not just
+the 2x2-grid case in `DEFAULT_SUITE`. `benchmark.py --mask-specialize --suite`
+measures 1.77x-1.87x speedup vs. Pass 1-2's generic per-element masking —
+comfortably past Requirements.md §4.4's own "1.15-1.3x vs generic masking"
+target.

@@ -86,13 +86,16 @@ def _run(cmd: list[str], stdin: str | None = None) -> str:
 
 
 def run_module(module_text: str, tile_size: int, tools: Toolchain,
-                vectorize: bool = False) -> list:
-    """Run fusion+tiling(+vectorization), lower to LLVM, JIT-execute, and
-    return the parsed nested-list output printed by printMemrefF32."""
+                vectorize: bool = False, mask_specialize: bool = False) -> list:
+    """Run fusion+tiling(+vectorization)(+mask-specialization), lower to LLVM,
+    JIT-execute, and return the parsed nested-list output printed by
+    printMemrefF32."""
     passes = [str(tools.attention_opt), "-",
               "--fusion-pass", f"--tiling-pass=tile-size={tile_size}"]
     if vectorize:
         passes.append("--vectorization-pass")
+    if mask_specialize:
+        passes.append("--mask-specialization-pass")
     fused_tiled = _run(passes, stdin=module_text)
 
     lowered = _run([str(tools.mlir_opt), "-", *_LOWER_FLAGS], stdin=fused_tiled)
@@ -137,13 +140,15 @@ def run_baseline_timed(module_text: str, tools: Toolchain) -> float:
 
 
 def run_fused_timed(module_text: str, tile_size: int, tools: Toolchain,
-                     vectorize: bool = False) -> float:
-    """Run fusion+tiling(+vectorization) on a bench_codegen.emit_fused_input_module
-    output, then lower+run. Returns total elapsed seconds for the timed loop
-    (not divided by iteration count)."""
+                     vectorize: bool = False, mask_specialize: bool = False) -> float:
+    """Run fusion+tiling(+vectorization)(+mask-specialization) on a
+    bench_codegen.emit_fused_input_module output, then lower+run. Returns
+    total elapsed seconds for the timed loop (not divided by iteration count)."""
     passes = [str(tools.attention_opt), "-",
               "--fusion-pass", f"--tiling-pass=tile-size={tile_size}"]
     if vectorize:
         passes.append("--vectorization-pass")
+    if mask_specialize:
+        passes.append("--mask-specialization-pass")
     fused_tiled = _run(passes, stdin=module_text)
     return _run_timed(fused_tiled, tools)

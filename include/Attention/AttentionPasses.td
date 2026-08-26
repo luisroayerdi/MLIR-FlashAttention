@@ -73,4 +73,29 @@ def VectorizationPass : Pass<"vectorization-pass", "::mlir::func::FuncOp"> {
   }];
 }
 
+def MaskSpecializationPass : Pass<"mask-specialization-pass", "::mlir::func::FuncOp"> {
+  let summary = "Specialize each K/V tile body by position relative to the causal diagonal";
+  let description = [{
+    Must run after --tiling-pass. For each K/V inner tile loop TilingPass
+    emits that applies a boolean mask (identified by the linalg.generic doing
+    arith.select against an i1 memref operand), wraps that loop's per-iteration
+    body in a two-level affine.if dispatching on the Q-tile / K-tile induction
+    variables relative to the causal diagonal:
+
+      MASKED   (k_start > q_end):  skip the tile entirely (do nothing --
+                                     online-softmax state unchanged)
+      FULL     (q_start >= k_end): run the same computation as the unmasked
+                                     path (skip the mask subview + select)
+      BOUNDARY (neither):          the original per-element masked computation,
+                                     unchanged
+
+    PRECONDITION: this classification is only correct for a causal mask
+    (mask[i,j] == true iff j > i). It is not verified against the mask's
+    actual contents -- see TRADEOFFS.md.
+
+    A K/V loop with no mask-select op (i.e. unmasked attention) is left
+    untouched.
+  }];
+}
+
 #endif // ATTENTION_PASS

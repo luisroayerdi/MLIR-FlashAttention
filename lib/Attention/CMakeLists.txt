@@ -6,6 +6,7 @@ add_mlir_dialect_library(MLIRAttention
         FusionPass.cpp
         TilingPass.cpp
         VectorizationPass.cpp
+        MaskSpecializationPass.cpp
 
         ADDITIONAL_HEADER_DIRS
         ${PROJECT_SOURCE_DIR}/include/Attention

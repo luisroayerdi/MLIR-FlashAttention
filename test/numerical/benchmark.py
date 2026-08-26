@@ -36,6 +36,7 @@ from pipeline import Toolchain, run_baseline_timed, run_fused_timed
 from validate import run_case
 
 SPEEDUP_THRESHOLD = 1.2  # Requirements.md 5.2 acceptance criterion
+MASK_SPEC_SPEEDUP_THRESHOLD = 1.15  # Requirements.md 4.4 "1.15-1.3x vs generic masking"
 VARIANCE_WARN_FRACTION = 0.05  # Requirements.md 5.3 "flag variance >5%"
 
 
@@ -114,6 +115,73 @@ def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
     return ok
 
 
+def bench_mask_specialization_case(seq_q: int, seq_k: int, head_dim: int,
+                                    tile_size: int, seed: int, tools: Toolchain,
+                                    trials: int = 5, warmup_iters: int = 5,
+                                    timed_iters: int = 50) -> bool:
+    """Requirements.md 4.4's own performance target: speedup of Pass 4
+    (--mask-specialization-pass) over Pass 1+2's generic per-element masking,
+    both already fusion+tiling'd -- NOT the unfused-baseline comparison
+    bench_case() does. Always uses a causal mask (Pass 4 is a no-op
+    otherwise)."""
+    if seq_q % tile_size or seq_k % tile_size:
+        raise ValueError(
+            f"seq_q ({seq_q}) and seq_k ({seq_k}) must be divisible by "
+            f"tile_size ({tile_size}); TilingPass only supports full tiles."
+        )
+
+    label = f"seq_q={seq_q} seq_k={seq_k} head_dim={head_dim} tile={tile_size}"
+
+    correct = run_case(seq_q, seq_k, head_dim, tile_size, seed, True, tools,
+                        verbose=False, mask_specialize=True)
+    if not correct:
+        print(f"FAIL  {label}: numerical correctness check failed "
+              f"(see validate.py) -- skipping timing, per 5.2 'STOP' rule")
+        return False
+
+    rng = np.random.default_rng(seed)
+    Q = rng.standard_normal((seq_q, head_dim), dtype=np.float32)
+    K = rng.standard_normal((seq_k, head_dim), dtype=np.float32)
+    V = rng.standard_normal((seq_k, head_dim), dtype=np.float32)
+    scale = float(1.0 / np.sqrt(head_dim))
+    mask = np.triu(np.ones((seq_q, seq_k), dtype=bool), k=1)
+
+    try:
+        generic_times = _trial_times(
+            lambda: emit_fused_input_module(Q, K, V, scale, mask, warmup_iters, timed_iters),
+            lambda m: run_fused_timed(m, tile_size, tools, mask_specialize=False),
+            trials, timed_iters,
+        )
+        specialized_times = _trial_times(
+            lambda: emit_fused_input_module(Q, K, V, scale, mask, warmup_iters, timed_iters),
+            lambda m: run_fused_timed(m, tile_size, tools, mask_specialize=True),
+            trials, timed_iters,
+        )
+    except RuntimeError as e:
+        print(f"FAIL  {label}: execution error\n{e}")
+        return False
+
+    generic_med = statistics.median(generic_times)
+    spec_med = statistics.median(specialized_times)
+    generic_stdev = statistics.stdev(generic_times) if trials > 1 else 0.0
+    spec_stdev = statistics.stdev(specialized_times) if trials > 1 else 0.0
+    speedup = generic_med / spec_med
+
+    ok = speedup > MASK_SPEC_SPEEDUP_THRESHOLD
+
+    variance_note = ""
+    for name, med, sd in (("generic", generic_med, generic_stdev), ("specialized", spec_med, spec_stdev)):
+        if med > 0 and sd / med > VARIANCE_WARN_FRACTION:
+            variance_note += f" [WARN: {name} stdev/median = {sd / med:.1%} > 5%]"
+
+    status = "PASS" if ok else "FAIL"
+    print(f"{status}  {label}  "
+          f"generic={generic_med * 1e6:.2f}us (+/-{generic_stdev * 1e6:.2f})  "
+          f"specialized={spec_med * 1e6:.2f}us (+/-{spec_stdev * 1e6:.2f})  "
+          f"speedup={speedup:.3f}x (need >{MASK_SPEC_SPEEDUP_THRESHOLD}x){variance_note}")
+    return ok
+
+
 DEFAULT_SUITE = [
     # (seq_q, seq_k, head_dim, tile_size, use_mask)
     (128, 128, 64, 32, False),
@@ -141,6 +209,18 @@ VECTORIZED_SUITE = [
     (32, 32, 16, 8, True),
 ]
 
+# --mask-specialize --suite uses this suite (via bench_mask_specialization_case,
+# which always uses a causal mask -- there is nothing to specialize otherwise).
+# Larger tile grids than DEFAULT_SUITE's masked config (8x8 tiles at seq=256)
+# so more FULL/MASKED tiles get skipped relative to BOUNDARY-only ones,
+# giving Pass 4's own effect more room to show up against the unfused-vs-fused
+# noise floor.
+MASK_SPEC_SUITE = [
+    # (seq_q, seq_k, head_dim, tile_size)
+    (256, 256, 64, 32),
+    (512, 512, 64, 32),
+]
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -153,6 +233,13 @@ def main() -> int:
     parser.add_argument("--vectorize", action="store_true",
                          help="also apply --vectorization-pass (Pass 3) to the "
                               "fused variant being timed")
+    parser.add_argument("--mask-specialize", action="store_true",
+                         help="benchmark Pass 4 (--mask-specialization-pass) "
+                              "against generic per-element masking instead of "
+                              "the default unfused-vs-fused comparison "
+                              "(Requirements.md 4.4's own speedup target); "
+                              "always uses a causal mask; --vectorize is "
+                              "ignored if both are passed")
     parser.add_argument("--trials", type=int, default=5,
                          help="independent subprocess trials per config")
     parser.add_argument("--warmup-iters", type=int, default=5)
@@ -168,6 +255,28 @@ def main() -> int:
     except RuntimeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+
+    if args.mask_specialize:
+        if args.suite:
+            results = [
+                bench_mask_specialization_case(sq, sk, hd, ts, args.seed, tools,
+                                                args.trials, args.warmup_iters,
+                                                args.timed_iters)
+                for sq, sk, hd, ts in MASK_SPEC_SUITE
+            ]
+            n_pass = sum(results)
+            print(f"\n{n_pass}/{len(results)} configs met the "
+                  f">{MASK_SPEC_SPEEDUP_THRESHOLD}x mask-specialization threshold")
+            return 0 if all(results) else 1
+
+        seq_q = args.seq_q or 256
+        seq_k = args.seq_k or 256
+        head_dim = args.head_dim or 64
+        tile_size = args.tile_size or 32
+        ok = bench_mask_specialization_case(seq_q, seq_k, head_dim, tile_size,
+                                             args.seed, tools, args.trials,
+                                             args.warmup_iters, args.timed_iters)
+        return 0 if ok else 1
 
     if args.suite:
         suite = VECTORIZED_SUITE if args.vectorize else DEFAULT_SUITE

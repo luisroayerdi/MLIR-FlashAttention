@@ -7,8 +7,11 @@ as-built Pass 1–2 implementation (`FusedOp` has no SSA result; QK^T is matched
 `linalg.generic`, not `linalg.matmul`; scale uses `mulf` not `divf`; fusion matching
 walks buffer DPS writers, not SSA def-use chains). §5 corrected to match the as-built
 Pass 3 implementation (whole-tile vectorization via MLIR's built-in linalg vectorizer,
-not the manual VF=8/remainder-loop scheme the original pseudocode implied). See
-`TRADEOFFS.md` for the original discovery of these discrepancies.
+not the manual VF=8/remainder-loop scheme the original pseudocode implied). §6.3
+corrected to match the as-built Pass 4 implementation (inline `affine.if` with
+`IntegerSet` conditions and direct block cloning, not `arith.cmpi` + outlined/inlined
+kernel functions). See `TRADEOFFS.md` for the original discovery of these
+discrepancies.
 
 ---
 
@@ -514,30 +517,64 @@ MASKED   if k_start > q_end     // entire tile is above diagonal: skip
 BOUNDARY if neither             // straddles diagonal: per-element check
 ```
 
-### 6.3 Generated Code Structure
+### 6.3 Generated Code Structure (as-built)
+
+`MaskSpecializationPass` is an `OpRewritePattern<affine::AffineForOp>` matching
+the K/V inner tile loop TilingPass emits (identified as: a loop whose parent
+op is another `affine.for` — the Q outer loop — and whose body directly
+contains a `linalg.generic` with an `i1`-typed memref operand — the
+mask-select op from §4.4's "3. Optional mask" step). A K-loop with no such op
+(unmasked attention) is left untouched.
+
+Rather than `arith.cmpi` feeding a generic conditional plus outlined/inlined
+kernel functions, the pass builds `affine.if` directly against an
+`IntegerSet` over the two loop induction variables `(i, j)` — this is the
+MLIR-idiomatic way to express a loop-bound-relative condition (no separate
+comparison op needed; the tile size `T`, read from the K-loop's constant
+step, is folded into the set as a literal coefficient), and skips the
+outline/inline round-trip entirely by moving/cloning the K-loop's existing
+body ops directly into the new control-flow structure:
 
 ```mlir
-%is_full    = arith.cmpi sge, %q_start, %k_end
-%is_masked  = arith.cmpi sgt, %k_start, %q_end
-affine.if %is_masked {
-  // skip: do nothing (zero contribution)
+// MASKED: k_start > q_end  <=>  j - i - T >= 0
+#masked = affine_set<(i, j) : (j - i - T >= 0)>
+// FULL:   q_start >= k_end <=>  i - j - T + 1 >= 0
+#full   = affine_set<(i, j) : (i - j - T + 1 >= 0)>
+
+affine.if #masked(%i, %j) {
+  // empty: skip the tile entirely (online-softmax state unchanged)
 } else {
-  affine.if %is_full {
-    // full tile: call inner loop with no mask check
-    call @inner_full(%Q_tile, %K_tile, %V_tile, ...)
+  affine.if #full(%i, %j) {
+    // clone of the original body, with the mask subview + arith.select
+    // dropped and every consumer of the select's output (S_masked)
+    // rewired to read the pre-mask score buffer (S_tile) instead
   } else {
-    // boundary tile: call inner loop with per-element mask
-    call @inner_boundary(%Q_tile, %K_tile, %V_tile, %mask_tile, ...)
+    // the original body, moved here unchanged (per-element arith.select
+    // against the mask tile, exactly as TilingPass emitted it)
   }
 }
 ```
 
-The three kernel variants are outlined functions produced by the pass and inlined by a subsequent canonicalization step.
+The rewiring for the FULL branch is done via `IRMapping`: before cloning,
+`S_masked` (the mask-select op's DPS init) is pre-mapped to whatever `S_tile`
+(the op's non-mask DPS input) resolves to in the clone, then the mask
+subview and select ops themselves are skipped during the clone walk — every
+downstream op that referenced `S_masked` in the original body automatically
+picks up the cloned `S_tile` instead when `rewriter.clone()` remaps its
+operands. See TRADEOFFS.md for why the outlined-function framing was
+dropped and for a correctness precondition this design implies.
 
 ### 6.4 Known Limitations
 
 - Requires Pass 2 (Tiling) to have already created the affine.for structure; must run after `--tiling-pass`.
 - Only handles square causal masks; rectangular cross-attention masks out of scope.
+- **Correctness precondition, not verified by the pass:** the FULL/MASKED
+  classification is only valid if the mask is actually causal
+  (`mask[i,j] == true` iff `j > i`). The pass has no way to inspect the
+  mask's runtime contents — it classifies tiles purely from loop-induction-
+  variable position — so passing a non-causal boolean mask to
+  `attention.fused` and then running `--mask-specialization-pass` would
+  silently produce wrong results rather than erroring. See TRADEOFFS.md.
 
 ---
 
