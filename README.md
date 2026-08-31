@@ -1,28 +1,28 @@
-# Deconstructing FlashAttention: A Compiler-Centric Analysis of Attention Kernel Optimization 
+# MLIR-FlashAttention
 
 ## Introduction
 
-### The Problem: Attention is Slow
+### The Problem
 
-Transformer models power modern AI (GPT, Claude, etc.), and their core operation is **attention**. The standard attention computation follows this formula:
+Attention is the core, and most expensive, operation in transformer models:
 
 ```
 Attention(Q, K, V) = softmax(Q·K^T / √d_k) · V
 ```
 
-Breaking this down into steps:
+Computed naively, this is five separate operations:
 
-1. **MatMul**: Multiply query (Q) by key transpose (K^T)
-2. **Scale**: Divide by √d_k (dimension size)
-3. **Mask**: Apply causal mask (prevent looking at future tokens)
-4. **Softmax**: Normalize to probabilities
-5. **MatMul**: Multiply result by values (V)
+1. **MatMul**: Q · K^T
+2. **Scale**: divide by √d_k
+3. **Mask**: apply the causal mask
+4. **Softmax**: normalize to probabilities
+5. **MatMul**: multiply by V
 
-**The bottleneck:** Running these as separate operations means repeatedly writing intermediate results to slow GPU memory (HBM - High Bandwidth Memory). For a 1024-token sequence, this creates gigabytes of memory traffic.
+Each operation writes its result to GPU HBM (High Bandwidth Memory) and reads it back for the next step. That round trip, not the matmuls themselves, is the bottleneck.
 
-### FlashAttention's Solution
+### Fusing the Bottleneck Away
 
-FlashAttention (Dao et al., 2022-2025) demonstrated dramatic speedups by **fusing** all operations into a single GPU kernel. Instead of:
+FlashAttention (Dao et al., 2022-2025) removes this traffic by fusing all five operations into one kernel and keeping intermediate values in fast on-chip SRAM instead of writing them back to HBM:
 
 ```
 GPU Memory → Load Q,K → Compute QK^T → Write to Memory
@@ -31,32 +31,21 @@ GPU Memory → Load Q,K → Compute QK^T → Write to Memory
            → Load masked → Softmax → Write to Memory
 ```
 
-FlashAttention does:
+becomes
 
 ```
-GPU Memory → Load tile of Q,K → Compute+Scale+Mask+Softmax in fast SRAM → Write final result
+GPU Memory → Load tile of Q,K → Compute+Scale+Mask+Softmax in SRAM → Write final result
 ```
 
-**Key insight:** Keep intermediate values in fast on-chip memory (SRAM) instead of slow off-chip memory (HBM).
+The catch: this speedup comes from thousands of lines of hand optimized CUDA, specific to one hardware vendor and opaque to anyone trying to modify it.
 
-**The catch:** FlashAttention is written in hand-optimized CUDA code - thousands of lines specific to NVIDIA GPUs.
+### Our Approach
 
-### The Research Question
+Applying FlashAttention's memory-aware optimizations to new hardware requires compiler infrastructure that doesn't exist in general purpose compilers. This project asks: **can FlashAttention's optimizations be expressed as reusable MLIR compiler passes instead of hand-written kernels, and how much performance can we recover that way?**
 
-**Can we express FlashAttention's optimizations as reusable compiler passes instead of hand-written kernels?**
+This matters because compiler passes are portable across GPU vendors, inspectable where hand-written kernels are opaque, and reusable beyond attention itself. The goal is not to beat FlashAttention's hand-tuned performance. It's to answer three narrower questions: which of FlashAttention's optimizations can be expressed as compiler transformations, how much performance compiler infrastructure alone can recover, and what gaps remain.
 
-**Why this matters:**
-
-- **Portability:** Compiler passes work across GPU vendors (NVIDIA, AMD, Intel)
-- **Maintainability:** High-level passes are easier to understand and modify than CUDA
-- **Reusability:** Same optimization strategy can apply to other operations beyond attention
-- **Transparency:** Hand-written kernels are opaque; compiler passes are inspectable
-
-**Our goal is NOT to beat FlashAttention's performance.** Instead, we ask:
-
-1. Which FlashAttention optimizations can be expressed as compiler transformations?
-2. How much performance can we recover using only compiler infrastructure?
-3. What gaps remain, and what would compilers need to close them?
+This project answers it with a custom MLIR dialect and a pipeline of compiler passes, one per FlashAttention optimization. A fusion pass collapses attention's five-operation sequence into a single fused IR op. A tiling pass expands that op into memory-aware loops implementing online softmax, the transformation that removes the HBM round trips described above. Fusion reduces the five-op IR sequence to one op, and tiling eliminates four intermediate buffers from GPU memory, roughly 16MB of HBM traffic removed per attention layer at a 1024-token sequence, from the compiler transformation alone. A vectorization pass and a causal mask specialization pass build on top. All four passes are implemented and verified, on CPU, against automated IR tests and numerical correctness. Details below.
 
 ---
 
@@ -76,7 +65,7 @@ The compiler driver binary is produced at `build/bin/attention-opt`.
 
 ---
 
-## Inspecting the IR Pipeline
+## IR Pipeline
 
 The fastest way to understand the project is to watch the IR transform at each pass. All commands run from the repo root.
 
@@ -219,7 +208,7 @@ python3 test/numerical/validate.py --seq-q 16 --seq-k 16 --head-dim 8 --tile-siz
 python3 test/numerical/validate.py --seq-q 16 --seq-k 16 --head-dim 8 --tile-size 4 --mask --mask-specialize
 ```
 
-`seq-q` and `seq-k` must be divisible by `tile-size` — `TilingPass` does not yet handle remainder tiles (see TRADEOFFS.md). There is currently no batch dimension in `attention.fused`, so each run validates one `[seq, head_dim]` case at a time.
+`seq-q` and `seq-k` must be divisible by `tile-size` — `TilingPass` does not yet handle remainder tiles (see Design.md §4.6). There is currently no batch dimension in `attention.fused`, so each run validates one `[seq, head_dim]` case at a time.
 
 The tool paths (`attention-opt`, `mlir-opt`, `mlir-runner`, runner-utils shared libs) are auto-discovered from `build/CMakeCache.txt` — no configuration needed as long as `build/` has been configured per the Build section above.
 
@@ -254,9 +243,9 @@ python3 test/numerical/benchmark.py --seq-q 512 --seq-k 512 --head-dim 64 --tile
 python3 test/numerical/benchmark.py --seq-q 64 --seq-k 64 --head-dim 16 --tile-size 16 --trials 5 --full-pipeline
 ```
 
-**`--vectorize` / `--full-pipeline` scale caveat:** both use a separate, smaller `VECTORIZED_SUITE` (`tile-size` 8–16, `head-dim` 16), not `DEFAULT_SUITE`. Full-tile vectorization (Design.md §5.2) has no hardware-width chunking, so JIT compile time blows up once `tile_size² × head_dim` exceeds ~4,096 — this includes `DEFAULT_SUITE`'s own `tile=32`/`head_dim=64` production-scale config. Don't pass `--tile-size 32 --head-dim 64` with either flag for a single-case run either — it will hang (multi-minute, multi-GB RSS) rather than error. See TRADEOFFS.md.
+**`--vectorize` / `--full-pipeline` scale caveat:** both use a separate, smaller `VECTORIZED_SUITE` (`tile-size` 8–16, `head-dim` 16), not `DEFAULT_SUITE`. Full-tile vectorization (Design.md §5.2) has no hardware-width chunking, so JIT compile time blows up once `tile_size² × head_dim` exceeds ~4,096 — this includes `DEFAULT_SUITE`'s own `tile=32`/`head_dim=64` production-scale config. Don't pass `--tile-size 32 --head-dim 64` with either flag for a single-case run either — it will hang (multi-minute, multi-GB RSS) rather than error (see Design.md §5.3).
 
-Requirements.md §5.2 also calls for `perf stat -e cycles,instructions,cache-misses` profiling — that's Linux-only and unavailable on macOS, so this harness reports wall-clock speedup only (the actual quantity the acceptance gate checks). See TRADEOFFS.md.
+Requirements.md §5.2 also calls for `perf stat -e cycles,instructions,cache-misses` profiling — that's Linux-only and unavailable on macOS, so this harness reports wall-clock speedup only (the actual quantity the acceptance gate checks).
 
 **Current result:** all 4 default-suite configs pass (Pass 1–2, no vectorization), with measured speedups of 1.36x–1.49x — comfortably clearing the §5.2 `>1.2x` threshold. With `--vectorize` (Pass 1–2–3, small scale — see caveat above), all 3 `VECTORIZED_SUITE` configs pass at 4.8x–6.5x speedup, clearing Pass 3's own §4.3 "1.5-2x vs scalar" target. With `--mask-specialize` (Pass 1–2 vs. Pass 1–2–4, `tile=32`/`head_dim=64`, no scale caveat here since Pass 4 doesn't vectorize anything), both `MASK_SPEC_SUITE` configs pass at 1.77x–1.87x speedup vs. generic masking — comfortably clearing Pass 4's own §4.4 "1.15-1.3x" target. With `--full-pipeline` (all four passes, small scale), all 3 `VECTORIZED_SUITE` configs pass at 5.0x–7.6x speedup — clearing the §5.4 `>1.5x` Go/No-Go bar for proceeding to GPU work.
 
@@ -264,9 +253,9 @@ Requirements.md §5.2 also calls for `perf stat -e cycles,instructions,cache-mis
 
 ## Project Documents
 
-The project is driven by three documents with different roles. **Requirements and Design are the stable foundation** — they define what the project is trying to do and why. TRADEOFFS is a living record of every non-obvious implementation decision made along the way.
+The project is driven by two documents: Requirements defines what the project is trying to do and why, Design defines how it's built and stays corrected against what actually shipped.
 
-### [Requirements.md](Requirements.md) — What and Why
+### [Requirements.md](docs/Requirements.md) — What and Why
 
 Defines the research question, success criteria, and pass specifications. Reading this first gives the full picture of what each pass is supposed to accomplish and how performance will be measured. Key sections:
 
@@ -275,11 +264,11 @@ Defines the research question, success criteria, and pass specifications. Readin
 - **§3 FlashAttention Techniques** — which FA1/FA2 techniques each pass implements and why
 - **§4 Pass Specifications** — per-pass input IR, output IR, algorithm, and test commands
 - **§6 Baselines** — PyTorch unfused, torch.compile, FlashAttention-2 (the ablation study targets)
-- **§9 Development Workflow** — the propose → confirm → implement protocol
+- **§8 Deliverables** — what the research report/analysis is expected to produce
 
 > The IR snippets in Requirements.md are illustrative. Where they conflict with Design.md, Design.md takes precedence.
 
-### [Design.md](Design.md) — How
+### [Design.md](docs/Design.md) — How
 
 The technical design approved before implementation began. Contains the exact IR transformation at each stage, the `attention.fused` op definition, per-pass algorithms in pseudocode, and the rationale for every structural decision. This is the reference for what the code is supposed to produce.
 
@@ -290,12 +279,6 @@ Key sections:
 - **§3 Pass 1: Fusion** — pattern matching algorithm and IR examples
 - **§4 Pass 2: Tiling** — online softmax algorithm and full post-tiling IR structure
 - **§5–7 Passes 3–5** — vectorization, mask specialization, GPU lowering (Passes 3–4 implemented; Pass 5 deferred until GPU hardware)
-
-### [TRADEOFFS.md](TRADEOFFS.md) — Decisions Made During Implementation
-
-Updated continuously as implementation reveals decisions not fully resolved by Design.md. Each entry records what was decided, why, and what it costs. This is the right place to look when the code does something that seems surprising relative to the design.
-
-Current entries cover: why V is in `attention.fused`, why scale is an SSA operand, the memref-based pattern matching strategy, how the scale value is extracted from the linalg.generic body, why the tiling pass fully expands rather than tiling-in-place, dialect loading requirements, two Pass 3 vectorizer gotchas (the `linalg::vectorize()` erase requirement and `i1`-memref vectorization corrupting masked results), Pass 4's inline-cloning design plus its unverified causal-mask precondition, and why the Phase 2 `--full-pipeline` Go/No-Go benchmark inherits Pass 3's small-scale JIT ceiling.
 
 ---
 
@@ -308,7 +291,3 @@ Current entries cover: why V is in `attention.fused`, why scale is an SSA operan
 | 3 — Vectorization | `--vectorization-pass` | ✅ Implemented, FileCheck + numerically validated + CPU-speedup validated (small scale — see below) |
 | 4 — Mask Specialization | `--mask-specialization-pass` | ✅ Implemented, FileCheck + numerically validated + CPU-speedup validated |
 | 5 — GPU Lowering | `--gpu-lowering-pass` | Deferred (requires GPU hardware) |
-
-Current milestone: Requirements.md §9.2's Phase 1 ("Core FA1 Passes") and Phase 2 ("Integration & CPU Testing") are both complete. All four passes are implemented and validated individually — numerical correctness (§5.1) and CPU speedup hold for Passes 1–2 (`test/numerical/`, 4/4 default-suite benchmark configs, 1.36x–1.49x speedup vs. unfused), Pass 3 (`--vectorize`, 5/5 numerical configs, 3/3 small-scale benchmark configs at 4.8x–6.5x speedup — see the scale caveat below), and Pass 4 (`--mask-specialize`, 5/5 default-suite numerical configs plus two ad hoc larger tile grids, 2/2 benchmark configs at 1.77x–1.87x speedup vs. generic masking) — and together: `test/Attention/integration.mlir` FileCheck-verifies all four passes compose in one pipeline invocation starting from raw unfused input, `validate.py --suite --vectorize --mask-specialize` passes 5/5 numerically, and `benchmark.py --full-pipeline` — the literal §9.2 Phase 2 "CHECKPOINT: CPU validation must pass" / §5.4 Go/No-Go gate — clears the `>1.5x` threshold at 5.0x–7.6x speedup (small scale, see caveat below). Minimum Viable success criteria (§2) are met, and Pass 3's §4.3 and Pass 4's §4.4 own performance targets are both cleared. See Design.md §5–6 for the as-built approach of each pass (Pass 3 drives MLIR's built-in `linalg::vectorize` rather than a hand-rolled VF/remainder scheme; Pass 4 builds inline `affine.if`/`IntegerSet` dispatch with block cloning rather than outlined kernel functions) and §8.2.1 for the as-built Phase 2 integration work; TRADEOFFS.md records real bugs found and fixed along the way (Pass 3: a `linalg::vectorize()` erase gotcha, and `i1`/mask-memref vectorization producing wrong results; Pass 4: an unverified-but-documented precondition that specialization is only correct for an actually-causal mask). Next step: Phase 3, Pass 5 (GPU Lowering), once GPU hardware is available — currently blocked.
-
-**Pass 3 CPU-benchmark scale caveat:** full-tile vectorization (no hardware-width chunking — see Design.md §5.2) makes JIT compile time blow up once `tile_size² × head_dim` exceeds ~4,096 — which includes Pass 1–2's own production-scale `tile=32`/`head_dim=64` benchmark config. `benchmark.py --vectorize --suite` therefore runs a separate, smaller `VECTORIZED_SUITE` rather than `DEFAULT_SUITE`; see TRADEOFFS.md "Vectorization pass: full-tile vectorization does not scale to CPU JIT compilation at production tile sizes" for the measured cliff and the fix (deferred as future work).
