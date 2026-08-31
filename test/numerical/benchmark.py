@@ -28,6 +28,7 @@ Usage:
 import argparse
 import statistics
 import sys
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -39,6 +40,19 @@ SPEEDUP_THRESHOLD = 1.2  # Requirements.md 5.2 acceptance criterion
 GO_NO_GO_THRESHOLD = 1.5  # Requirements.md 5.4 Go/No-Go "PROCEED if >1.5x speedup vs unfused"
 MASK_SPEC_SPEEDUP_THRESHOLD = 1.15  # Requirements.md 4.4 "1.15-1.3x vs generic masking"
 VARIANCE_WARN_FRACTION = 0.05  # Requirements.md 5.3 "flag variance >5%"
+
+
+@dataclass
+class BenchResult:
+    """Numeric result of one bench_case()/bench_mask_specialization_case()
+    call, for callers (e.g. analyze_ablation.py) that need the actual
+    numbers rather than just pass/fail."""
+    ok: bool
+    speedup: float
+    a_med: float     # baseline_med (bench_case) or generic_med (mask-spec)
+    b_med: float      # fused_med (bench_case) or specialized_med (mask-spec)
+    a_stdev: float
+    b_stdev: float
 
 
 def _trial_times(module_fn, run_fn, trials: int, timed_iters: int) -> list[float]:
@@ -79,7 +93,7 @@ def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
     if not correct:
         print(f"FAIL  {label}: numerical correctness check failed "
               f"(see validate.py) -- skipping timing, per 5.2 'STOP' rule")
-        return False
+        return BenchResult(False, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     rng = np.random.default_rng(seed)
     Q = rng.standard_normal((seq_q, head_dim), dtype=np.float32)
@@ -102,7 +116,7 @@ def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
         )
     except RuntimeError as e:
         print(f"FAIL  {label}: execution error\n{e}")
-        return False
+        return BenchResult(False, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     base_med = statistics.median(baseline_times)
     fused_med = statistics.median(fused_times)
@@ -122,7 +136,7 @@ def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
           f"baseline={base_med * 1e6:.2f}us (+/-{base_stdev * 1e6:.2f})  "
           f"fused={fused_med * 1e6:.2f}us (+/-{fused_stdev * 1e6:.2f})  "
           f"speedup={speedup:.3f}x (need >{threshold}x){variance_note}")
-    return ok
+    return BenchResult(ok, speedup, base_med, fused_med, base_stdev, fused_stdev)
 
 
 def bench_mask_specialization_case(seq_q: int, seq_k: int, head_dim: int,
@@ -147,7 +161,7 @@ def bench_mask_specialization_case(seq_q: int, seq_k: int, head_dim: int,
     if not correct:
         print(f"FAIL  {label}: numerical correctness check failed "
               f"(see validate.py) -- skipping timing, per 5.2 'STOP' rule")
-        return False
+        return BenchResult(False, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     rng = np.random.default_rng(seed)
     Q = rng.standard_normal((seq_q, head_dim), dtype=np.float32)
@@ -169,7 +183,7 @@ def bench_mask_specialization_case(seq_q: int, seq_k: int, head_dim: int,
         )
     except RuntimeError as e:
         print(f"FAIL  {label}: execution error\n{e}")
-        return False
+        return BenchResult(False, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     generic_med = statistics.median(generic_times)
     spec_med = statistics.median(specialized_times)
@@ -189,7 +203,7 @@ def bench_mask_specialization_case(seq_q: int, seq_k: int, head_dim: int,
           f"generic={generic_med * 1e6:.2f}us (+/-{generic_stdev * 1e6:.2f})  "
           f"specialized={spec_med * 1e6:.2f}us (+/-{spec_stdev * 1e6:.2f})  "
           f"speedup={speedup:.3f}x (need >{MASK_SPEC_SPEEDUP_THRESHOLD}x){variance_note}")
-    return ok
+    return BenchResult(ok, speedup, generic_med, spec_med, generic_stdev, spec_stdev)
 
 
 DEFAULT_SUITE = [
@@ -290,20 +304,20 @@ def main() -> int:
                            threshold=GO_NO_GO_THRESHOLD)
                 for sq, sk, hd, ts, mask in FULL_PIPELINE_SUITE
             ]
-            n_pass = sum(results)
+            n_pass = sum(r.ok for r in results)
             print(f"\n{n_pass}/{len(results)} configs met the "
                   f">{GO_NO_GO_THRESHOLD}x Go/No-Go threshold")
-            return 0 if all(results) else 1
+            return 0 if all(r.ok for r in results) else 1
 
         seq_q = args.seq_q or 64
         seq_k = args.seq_k or 64
         head_dim = args.head_dim or 16
         tile_size = args.tile_size or 16
-        ok = bench_case(seq_q, seq_k, head_dim, tile_size, args.seed, args.mask,
-                         tools, args.trials, args.warmup_iters, args.timed_iters,
-                         vectorize=True, mask_specialize=True,
-                         threshold=GO_NO_GO_THRESHOLD)
-        return 0 if ok else 1
+        result = bench_case(seq_q, seq_k, head_dim, tile_size, args.seed, args.mask,
+                             tools, args.trials, args.warmup_iters, args.timed_iters,
+                             vectorize=True, mask_specialize=True,
+                             threshold=GO_NO_GO_THRESHOLD)
+        return 0 if result.ok else 1
 
     if args.mask_specialize:
         if args.suite:
@@ -313,19 +327,19 @@ def main() -> int:
                                                 args.timed_iters)
                 for sq, sk, hd, ts in MASK_SPEC_SUITE
             ]
-            n_pass = sum(results)
+            n_pass = sum(r.ok for r in results)
             print(f"\n{n_pass}/{len(results)} configs met the "
                   f">{MASK_SPEC_SPEEDUP_THRESHOLD}x mask-specialization threshold")
-            return 0 if all(results) else 1
+            return 0 if all(r.ok for r in results) else 1
 
         seq_q = args.seq_q or 256
         seq_k = args.seq_k or 256
         head_dim = args.head_dim or 64
         tile_size = args.tile_size or 32
-        ok = bench_mask_specialization_case(seq_q, seq_k, head_dim, tile_size,
-                                             args.seed, tools, args.trials,
-                                             args.warmup_iters, args.timed_iters)
-        return 0 if ok else 1
+        result = bench_mask_specialization_case(seq_q, seq_k, head_dim, tile_size,
+                                                  args.seed, tools, args.trials,
+                                                  args.warmup_iters, args.timed_iters)
+        return 0 if result.ok else 1
 
     if args.suite:
         suite = VECTORIZED_SUITE if args.vectorize else DEFAULT_SUITE
@@ -335,19 +349,19 @@ def main() -> int:
                        vectorize=args.vectorize)
             for sq, sk, hd, ts, mask in suite
         ]
-        n_pass = sum(results)
+        n_pass = sum(r.ok for r in results)
         print(f"\n{n_pass}/{len(results)} configs met the >{SPEEDUP_THRESHOLD}x "
               f"CPU validation threshold")
-        return 0 if all(results) else 1
+        return 0 if all(r.ok for r in results) else 1
 
     seq_q = args.seq_q or 256
     seq_k = args.seq_k or 256
     head_dim = args.head_dim or 64
     tile_size = args.tile_size or 32
-    ok = bench_case(seq_q, seq_k, head_dim, tile_size, args.seed, args.mask,
-                     tools, args.trials, args.warmup_iters, args.timed_iters,
-                     vectorize=args.vectorize)
-    return 0 if ok else 1
+    result = bench_case(seq_q, seq_k, head_dim, tile_size, args.seed, args.mask,
+                         tools, args.trials, args.warmup_iters, args.timed_iters,
+                         vectorize=args.vectorize)
+    return 0 if result.ok else 1
 
 
 if __name__ == "__main__":
