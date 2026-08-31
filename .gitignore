@@ -22,6 +22,9 @@ build/
 # Personal dev notes (not project documentation)
 NOTES.md
 
+# Tradeoffs log kept for personal reference only, not public
+docs/TRADEOFFS.md
+
 # Python
 __pycache__/
 *.pyc
