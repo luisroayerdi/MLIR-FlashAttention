@@ -580,41 +580,49 @@ dropped and for a correctness precondition this design implies.
 
 ## 7. Pass 5: GPU Backend Lowering (`--gpu-lowering-pass`)
 
-> **Status:** Design complete. Implementation deferred until GPU hardware (university HPCC or cloud) is available. CPU testing (Passes 1–4) is the immediate goal.
+> **Status:** Scope locked 2026-08-30 (see Requirements.md §4.5). Not yet
+> implemented -- Stage A/B authoring below is the next concrete step,
+> entirely local, no GPU hardware needed for it.
 
 ### 7.1 Goal
 
-Lower `linalg.matmul` ops inside the tiled loops to NVIDIA tensor core operations via the `nvgpu` dialect.
+Execute Passes 1-4's output on real GPU hardware in two stages: general-purpose GPU parallelization first (Stage A, no tensor cores), then drive MLIR's existing Transform-dialect `linalg.matmul` -> `nvgpu.mma.sync` lowering recipe on top (Stage B), rather than hand-authoring tensor-core intrinsic insertion. This mirrors Passes 1-4's own approach of driving existing MLIR infrastructure rather than reimplementing it, and keeps this pass's actual contribution scoped to integrating FA-specific IR into that infrastructure rather than reinventing tensor-core codegen.
 
 ### 7.2 Prerequisites
 
-- LLVM built with NVPTX backend (`-DLLVM_TARGETS_TO_BUILD=NVPTX`).
-- Tile size must be a multiple of 16 (tensor core fragment size). The default 128 satisfies this.
+- LLVM built with NVPTX backend (`-DLLVM_TARGETS_TO_BUILD="X86;NVPTX"`) and the MLIR CUDA runtime enabled. Not needed for authoring/FileCheck-testing this pass (§7.3-7.4 are target-independent IR) -- only for Stage 2/3 execution.
+- RTX 4090 (Ada, compute capability `sm_89`) is the primary target hardware, not A100 -- tensor cores are not an A100/H100-exclusive feature, and RTX 4090 spot pricing is the basis for this project's compute budget.
+- Tile size must be a multiple of 16 (tensor core fragment size) for Stage B. The default 128 satisfies this; the small CPU-scale tile sizes used in Passes 3-4's own testing (8-32, see §5.3/§6.4 Known Limitations) do not, and are Stage-A-only shapes.
 
 ### 7.3 Algorithm
 
 ```
-for each linalg.matmul in tiled body:
-  if operand shapes are multiples of 16:
-    insert layout transformations for tensor core fragment layout
-    %A_frag = nvgpu.ldmatrix %A_shared_tile
-    %B_frag = nvgpu.ldmatrix %B_shared_tile
-    %C_frag = nvgpu.mma.sync %A_frag, %B_frag, %C_acc
-              shape = [16, 16, 16] dtype = f32
-    nvgpu.stmatrix %C_frag, %C_shared_tile
-  else:
-    leave as linalg.matmul (no-op)
+Stage A:
+  gpu-kernel-outlining + gpu.launch wrapping of the tiled loop nest,
+  via MLIR's existing generic GPU lowering pipeline. No custom
+  intrinsic-insertion logic -- this stage is pipeline wiring, not a
+  novel pattern-matching pass.
+
+Stage B (applied to Stage A's output):
+  for each linalg.matmul in the gpu.launch body (QK^T, PV):
+    if operand shapes are multiples of 16:
+      apply MLIR's Transform-dialect matmul-to-mma.sync recipe
+      -convert-nvgpu-to-nvvm
+    else:
+      leave as linalg.matmul (Stage A result only)
 ```
 
 ### 7.4 Design Decisions
 
-- Targets `nvgpu.mma.sync` with `m16n8k16` fragments (A100 primary). H100 fragments (`m16n8k16` with bf16) to be evaluated on hardware.
-- Shared memory promotion (global → `gpu.shared` → ldmatrix) is part of this pass; it inserts `memref.alloca` in `gpu.private` and `gpu.shared` address spaces.
+- Reuses MLIR's existing Transform-dialect tensor-core lowering recipe instead of hand-authoring `ldmatrix`/`mma.sync`/`stmatrix` insertion (Requirements.md §4.5's originally-scoped approach, rejected -- risked becoming hand-written-CUDA-style kernel authoring, which cuts against this project's own Problem Statement critique of hand-written, opaque, NVIDIA-only kernels).
+- Targets `nvgpu.mma.sync` with fragment shapes valid on Ada (`sm_89`) tensor cores, replacing the original design's A100-specific `m16n8k16` assumption.
+- Shared memory promotion (global -> `gpu.shared` -> ldmatrix) remains part of Stage B, same as originally scoped.
 
 ### 7.5 Known Limitations (Anticipated)
 
 - `nvgpu` dialect may require additional conversion passes before PTX emission.
-- Register pressure with 128×128 tiles may cause spills; tunable via tile-size option.
+- Register pressure may cause spills at production tile sizes (128x128); tunable via tile-size option, same caveat Pass 2 (§4.6) and Pass 3 (§5.3) already carry at CPU scale.
+- Stage A alone (no tensor cores) is expected to under-perform hand-tuned kernels significantly; that gap, quantified, is itself part of this project's result (Requirements.md §1), not a defect to fix before reporting.
 
 ---
 
