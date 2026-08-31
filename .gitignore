@@ -19,6 +19,9 @@ build/
 # Mac
 .DS_Store
 
+# Personal dev notes (not project documentation)
+NOTES.md
+
 # Python
 __pycache__/
 *.pyc
