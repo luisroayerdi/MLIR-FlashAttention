@@ -7,6 +7,7 @@ add_mlir_dialect_library(MLIRAttention
         TilingPass.cpp
         VectorizationPass.cpp
         MaskSpecializationPass.cpp
+        GPULoweringPass.cpp
 
         ADDITIONAL_HEADER_DIRS
         ${PROJECT_SOURCE_DIR}/include/Attention
@@ -29,4 +30,9 @@ add_mlir_dialect_library(MLIRAttention
         MLIRVectorDialect
         MLIRTransformUtils
         MLIRRewrite
+        MLIRGPUDialect
+        MLIRGPUTransforms
+        MLIRSCFToGPU
+        MLIRDLTIDialect
+        MLIRControlFlowDialect
         )

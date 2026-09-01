@@ -98,4 +98,40 @@ def MaskSpecializationPass : Pass<"mask-specialization-pass", "::mlir::func::Fun
   }];
 }
 
+def GPULoweringPass : Pass<"gpu-lowering-pass", "::mlir::ModuleOp"> {
+  let summary = "Stage A: wrap TilingPass's Q-tile loop in gpu.launch and outline it";
+  let description = [{
+    Stage A of Pass 5 (GPU Backend Lowering, Design.md Section 7). Must run
+    after --tiling-pass: it operates on the affine.for loop nest that pass
+    emits, not on attention.fused.
+
+    For each function, finds the top-level affine.for loop -- TilingPass's
+    outer Q-tile loop, by construction the only loop at that nesting level
+    -- and maps it onto a 1-D grid of GPU blocks, one block per Q tile,
+    each block running with a single thread:
+    mlir::convertAffineLoopNestToGPULaunch(forOp, numBlockDims=1,
+    numThreadDims=0) wraps the loop body -- including the untouched inner
+    K/V tile loop, which stays a sequential affine.for inside the kernel --
+    in a gpu.launch op, replacing the induction variable with
+    blockIdx.x * tile_size. gpu-kernel-outlining (MLIR's existing pass, run
+    here as a nested pipeline) then moves that gpu.launch body into a
+    gpu.func in a new gpu.module, replacing the call site with
+    gpu.launch_func.
+
+    No tensor cores, no shared-memory promotion, no custom
+    intrinsic-insertion logic: this stage is pipeline wiring over existing
+    MLIR GPU infrastructure (Design.md Section 7.4), not a novel
+    pattern-matching pass. Stage B (matmul -> nvgpu.mma.sync) is separate
+    and not yet implemented.
+
+    PRECONDITION (documented, not verified): the top-level loop must
+    actually be safe to run in parallel across blocks. This holds for
+    TilingPass's output by construction -- each Q-tile iteration owns
+    freshly-allocated accumulators and writes a disjoint output subview --
+    but is not checked here: convertAffineLoopNestToGPULaunch itself
+    performs no dependence analysis, by its own documented contract, and
+    the responsibility for parallelization-safety falls on the caller.
+  }];
+}
+
 #endif // ATTENTION_PASS
