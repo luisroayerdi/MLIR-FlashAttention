@@ -25,7 +25,8 @@ discrepancies.
 | 2 — Tiling | `--tiling-pass` | `attention.fused` | affine.for + linalg (online softmax) | FA1: Tiling + Online Softmax |
 | 3 — Vectorization | `--vectorization-pass` | affine.for + scalar linalg | affine.for + vector ops | SIMD |
 | 4 — Mask Specialization | `--mask-specialization-pass` | affine.for + generic masking | Specialized kernel variants | Domain-specific |
-| 5 — GPU Lowering | `--gpu-lowering-pass` | linalg.matmul | nvgpu.mma | FA2: Tensor Cores |
+| 5 — GPU Lowering (Stage A) | `--gpu-lowering-pass` | affine.for (tiled loop nest) | gpu.launch / gpu.func | GPU parallelization, no tensor cores |
+| 5 — GPU Lowering (Stage B) | *(standalone, §7.6 — not part of the pipeline above)* | linalg.matmul (isolated) | nvgpu.mma.sync (isolated) | FA2: Tensor Cores |
 
 ### 1.2 IR Transformation Chain
 
@@ -84,12 +85,25 @@ elif tile_i * TILE < tile_j * TILE:  // masked tile (above diagonal)
 else:  // boundary tile (straddles diagonal)
   <per-element mask check>
 
-    ↓  Pass 5: GPU Lowering (deferred until hardware available)
+    ↓  Pass 5: GPU Lowering, Stage A (implemented 2026-09-01; execution
+       pending GPU hardware)
 
-// Stage 5: nvgpu dialect
+// Stage 5a: the same affine/linalg/memref IR above, unchanged, now inside
+// a gpu.func (see Design.md §7.3) -- Stage A wraps and outlines, it does
+// not rewrite the tile-body ops themselves.
+gpu.launch_func @tiled_attention_kernel::@tiled_attention_kernel
+  blocks in (%numQTiles, %c1, %c1) threads in (%c1, %c1, %c1) args(...)
+gpu.module @tiled_attention_kernel {
+  gpu.func @tiled_attention_kernel(...) kernel {
+    // unchanged affine.for (K/V loop) + linalg.generic tile body
+  }
+}
+
+// Stage B (§7.6) is a separate, standalone artifact -- a bare linalg.matmul
+// at the tensor-core recipe's native shape, not chained onto the IR above:
 %A_frag = nvgpu.ldmatrix %A
 %B_frag = nvgpu.ldmatrix %B
-%C_frag = nvgpu.mma %A_frag, %B_frag, %C_acc
+%C_frag = nvgpu.mma.sync %A_frag, %B_frag, %C_acc
 nvgpu.stmatrix %C_frag, %C
 ```
 
@@ -580,49 +594,156 @@ dropped and for a correctness precondition this design implies.
 
 ## 7. Pass 5: GPU Backend Lowering (`--gpu-lowering-pass`)
 
-> **Status:** Scope locked 2026-08-30 (see Requirements.md §4.5). Not yet
-> implemented -- Stage A/B authoring below is the next concrete step,
-> entirely local, no GPU hardware needed for it.
+> **Status:** Stage A implemented and FileCheck-tested 2026-09-01 (commit
+> `c8814c9`) -- see §7.1-7.5. Stage B rescoped the same day (§7.6) from
+> "applied on top of Stage A's output" to a standalone microbenchmark, after
+> investigating MLIR's actual tensor-core lowering API found it does not fit
+> that shape; not yet implemented.
 
 ### 7.1 Goal
 
-Execute Passes 1-4's output on real GPU hardware in two stages: general-purpose GPU parallelization first (Stage A, no tensor cores), then drive MLIR's existing Transform-dialect `linalg.matmul` -> `nvgpu.mma.sync` lowering recipe on top (Stage B), rather than hand-authoring tensor-core intrinsic insertion. This mirrors Passes 1-4's own approach of driving existing MLIR infrastructure rather than reimplementing it, and keeps this pass's actual contribution scoped to integrating FA-specific IR into that infrastructure rather than reinventing tensor-core codegen.
+Execute Passes 1-4's output on real GPU hardware, general-purpose parallelization first (Stage A, no tensor cores), to get a correct, timed baseline on real hardware with minimal engineering risk. Whether and how tensor cores factor in is §7.6.
 
 ### 7.2 Prerequisites
 
 - LLVM built with NVPTX backend (`-DLLVM_TARGETS_TO_BUILD="X86;NVPTX"`) and the MLIR CUDA runtime enabled. Not needed for authoring/FileCheck-testing this pass (§7.3-7.4 are target-independent IR) -- only for Stage 2/3 execution.
 - RTX 4090 (Ada, compute capability `sm_89`) is the primary target hardware, not A100 -- tensor cores are not an A100/H100-exclusive feature, and RTX 4090 spot pricing is the basis for this project's compute budget.
-- Tile size must be a multiple of 16 (tensor core fragment size) for Stage B. The default 128 satisfies this; the small CPU-scale tile sizes used in Passes 3-4's own testing (8-32, see §5.3/§6.4 Known Limitations) do not, and are Stage-A-only shapes.
 
-### 7.3 Algorithm
+### 7.3 Algorithm (Stage A, as-built)
 
 ```
-Stage A:
-  gpu-kernel-outlining + gpu.launch wrapping of the tiled loop nest,
-  via MLIR's existing generic GPU lowering pipeline. No custom
-  intrinsic-insertion logic -- this stage is pipeline wiring, not a
-  novel pattern-matching pass.
-
-Stage B (applied to Stage A's output):
-  for each linalg.matmul in the gpu.launch body (QK^T, PV):
-    if operand shapes are multiples of 16:
-      apply MLIR's Transform-dialect matmul-to-mma.sync recipe
-      -convert-nvgpu-to-nvvm
-    else:
-      leave as linalg.matmul (Stage A result only)
+For each function's top-level affine.for (TilingPass's outer Q-tile loop,
+the only loop at that nesting level by construction):
+  mlir::convertAffineLoopNestToGPULaunch(forOp, numBlockDims=1, numThreadDims=0)
+    -- one GPU block per Q tile, one thread per block; the nested K/V loop
+    is untouched, staying a sequential affine.for inside the kernel.
+Then gpu-kernel-outlining (MLIR's existing pass, run as a nested pipeline)
+  moves the gpu.launch body into a gpu.func/gpu.module, replacing the call
+  site with gpu.launch_func.
 ```
 
-### 7.4 Design Decisions
+No custom intrinsic-insertion logic, no dependence analysis of our own --
+this stage is pipeline wiring over existing MLIR GPU infrastructure, not a
+novel pattern-matching pass. See TRADEOFFS.md for why the "obvious" generic
+pipeline (`affine-parallelize` -> `convert-parallel-loops-to-gpu`) does not
+work on this project's `linalg.generic`/`memref.copy`-based IR, and why
+`convertAffineLoopNestToGPULaunch` was used directly instead.
 
-- Reuses MLIR's existing Transform-dialect tensor-core lowering recipe instead of hand-authoring `ldmatrix`/`mma.sync`/`stmatrix` insertion (Requirements.md §4.5's originally-scoped approach, rejected -- risked becoming hand-written-CUDA-style kernel authoring, which cuts against this project's own Problem Statement critique of hand-written, opaque, NVIDIA-only kernels).
-- Targets `nvgpu.mma.sync` with fragment shapes valid on Ada (`sm_89`) tensor cores, replacing the original design's A100-specific `m16n8k16` assumption.
-- Shared memory promotion (global -> `gpu.shared` -> ldmatrix) remains part of Stage B, same as originally scoped.
+### 7.4 Design Decisions (Stage A)
 
-### 7.5 Known Limitations (Anticipated)
+- One thread per block, no intra-tile parallelism: the simplest launch
+  mapping that is still correct by construction (each Q-tile iteration owns
+  freshly-allocated accumulators and writes a disjoint output subview --
+  documented, unverified precondition, see TRADEOFFS.md).
+- Tile size is unconstrained by Stage A itself (no tensor-core fragment
+  shape requirement applies here any more -- that constraint moved to §7.6,
+  scoped to the standalone microbenchmark only).
 
-- `nvgpu` dialect may require additional conversion passes before PTX emission.
-- Register pressure may cause spills at production tile sizes (128x128); tunable via tile-size option, same caveat Pass 2 (§4.6) and Pass 3 (§5.3) already carry at CPU scale.
-- Stage A alone (no tensor cores) is expected to under-perform hand-tuned kernels significantly; that gap, quantified, is itself part of this project's result (Requirements.md §1), not a defect to fix before reporting.
+### 7.5 Known Limitations (Stage A)
+
+- One thread per block means no intra-block parallelism is exploited --
+  Stage A alone is expected to under-perform hand-tuned/tensor-core kernels
+  significantly; that gap, quantified against torch.compile and
+  FlashAttention-2 (Requirements.md §6.2-6.3), is itself part of this
+  project's result (Requirements.md §1), not a defect to fix before
+  reporting.
+- Register pressure may cause spills at production tile sizes (128x128);
+  tunable via `--tiling-pass`'s existing `tile-size` option, same caveat
+  Pass 2 (§4.6) and Pass 3 (§5.3) already carry at CPU scale.
+
+### 7.6 Stage B: standalone tensor-core microbenchmark (rescoped 2026-09-01)
+
+**What changed and why.** The original Stage B plan (§7 pre-2026-09-01: "for
+each `linalg.matmul` in the gpu.launch body ... apply MLIR's Transform-dialect
+matmul-to-`mma.sync` recipe") assumed that recipe could be dropped onto Stage
+A's output roughly as-is. Investigating the actual API
+(`transform.nvgpu.rewrite_matmul_as_mma_sync`,
+`mlir/lib/Dialect/NVGPU/TransformOps/NVGPUTransformOps.cpp`) before
+implementing found three concrete mismatches with this project's IR and
+Stage A's design, not just missing wiring:
+
+1. It hard-requires a literal `linalg::MatmulOp` (`isa<linalg::MatmulOp>` in
+   `RewriteMatmulAsMmaSyncOp::applyToOne`) and explicitly rejects
+   "extended semantics" (non-default indexing maps) -- so it cannot fire on
+   `linalg.generic`, which is what TilingPass emits for both QK^T and PV
+   (TRADEOFFS.md: "QK^T matched as linalg.generic, not linalg.matmul"), and
+   QK^T's on-the-fly transposed read of K is exactly "extended semantics."
+   Making QK^T eligible would require materializing a real transposed copy
+   of K in memory first.
+2. `getIndexCalculators` supports exactly two hardcoded (M,N,K,dtype)
+   combinations -- `{16,8,4}` all-f32 (tf32) and `{16,8,16}` all-f16 -- not
+   "any multiple of 16" as originally assumed. This project's tiles (this
+   codebase is f32 throughout) would need retiling down to literal `16x8x4`
+   sub-blocks before the recipe applies to each one. No MLIR upstream test
+   demonstrates this composition (tile-to-instruction-shape, then rewrite);
+   every upstream example applies the recipe to a matmul that already *is*
+   exactly one instruction's shape.
+3. The recipe assumes single-warp (32-thread) SIMT execution -- it derives
+   `laneId` from `gpu.thread_id x` alone and distributes fragment loads/stores
+   across lanes 0-31 by construction. Stage A launches one thread per block
+   (§7.3). Fitting Stage B onto Stage A's output would need Stage A's launch
+   redesigned to 32 threads per block, and everything in the kernel that
+   *isn't* the matmul (softmax reductions, rescaling, accumulator updates)
+   would then redundantly re-execute 32x per block with no thread-id guard
+   (correctness-safe -- identical value, identical address -- but wasteful,
+   and unaddressed by any existing pass).
+
+Put together, integrating tensor cores into the actual fused/tiled/masked
+kernel is real, un-precedented engineering across three fronts at once (K
+transpose, sub-instruction retiling, warp-cooperative launch redesign), most
+of which cannot be checked for correctness without executing on real
+hardware -- i.e. the failure mode of getting any one of the three wrong is
+"debug a silent numerical bug on a paid GPU instance," which is exactly the
+risk this rescoping trades away.
+
+**What Stage B is instead: an isolated, low-risk hardware measurement.**
+MLIR's own upstream test suite already runs almost exactly this recipe,
+hardware-executed, as part of LLVM's continuous integration on real
+Ampere-class GPUs:
+`mlir/test/Integration/GPU/CUDA/TensorCore/sm80/transform-mma-sync-matmul-f32.mlir`
+-- a bare `linalg.matmul` at the tf32 recipe's native `16x4 @ 4x8 -> 16x8`
+shape, inside a single-warp `gpu.launch`, rewritten via
+`transform.nvgpu.rewrite_matmul_as_mma_sync`, lowered end-to-end by one
+existing pass (`-gpu-lower-to-nvvm-pipeline`), executed, and numerically
+checked against a known result. Stage B closely mirrors that test rather
+than inventing a new composition:
+
+```
+Standalone kernel (no TilingPass/attention.fused involved):
+  bare linalg.matmul, shape = the tf32 recipe's native 16x4 @ 4x8 -> 16x8
+  gpu.launch, blockDim = (32,1,1)  -- one warp
+  transform.nvgpu.rewrite_matmul_as_mma_sync
+  -gpu-lower-to-nvvm-pipeline (cubin-chip=sm_89, our actual target -- tf32
+    mma.sync is a stable Ampere-generation PTX primitive Ada keeps full
+    backward compatibility with, so this substitution from upstream's
+    sm_80 is architectural continuity, not a leap)
+
+Compared, same shape, wall-clock:
+  (a) the tensor-core path above
+  (b) the same matmul lowered through Stage A's plain gpu.launch path
+      (§7.3, no tensor cores)
+```
+
+**What this sacrifices.** No single "the whole FA kernel runs faster with
+tensor cores" number. The tensor-core result is a separate, honestly-scoped
+finding: MLIR's existing tensor-core lowering recipe delivers a real,
+hardware-measured speedup at the primitive level; integrating it into this
+project's actual online-softmax kernel needs the three fronts of further
+engineering listed above, identified but not completed. Per Requirements.md
+§1's actual goal ("identify compiler limitations," "document tradeoffs," not
+"beat FlashAttention-2"), this is still a legitimate, quantified answer to
+the research question -- arguably a cleaner one, since it isolates exactly
+what tensor cores buy from this project's own kernel-authoring overhead
+rather than conflating the two.
+
+**Known limitations:** the measured tensor-core speedup is for an isolated,
+primitive-shaped matmul, not representative of a full attention kernel's
+achievable tensor-core performance; no shared-memory promotion (`ldmatrix`
+staging through `gpu.shared`) is exercised, since the upstream recipe this
+mirrors reads directly from global memory at this shape. Requirements.md
+§6.4's ablation table treats this as a separate measurement, not a rung on
+the cumulative Fusion->Tiling->Vectorization->Mask Specialization->GPU
+ladder (see §6.4 there for the updated framing).
 
 ---
 

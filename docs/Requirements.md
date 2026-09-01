@@ -314,58 +314,54 @@ python3 test/verify_mask_tiles.py --seq-len=1024 --tile-size=128
 
 ### 4.5 Pass 5: GPU Backend Lowering
 
-**Goal:** Execute the compiler-built pipeline (Passes 1-4 output) on real GPU hardware. First, general-purpose GPU parallelization with no tensor cores (Stage A), to get a correct, timed baseline. Then, drive MLIR's existing Transform-dialect `linalg.matmul` -> `nvgpu.mma.sync` lowering recipe on top (Stage B), rather than hand-authoring tensor-core intrinsic insertion from scratch -- consistent with this project's own thesis of reusing compiler infrastructure instead of hand-writing kernels.
+**Goal:** Execute the compiler-built pipeline (Passes 1-4 output) on real GPU hardware via general-purpose GPU parallelization, no tensor cores (Stage A) -- `--gpu-lowering-pass`, implemented and FileCheck-tested 2026-09-01. Tensor cores (Stage B) are a related but separate, standalone measurement -- see below; not applied to Passes 1-4's output. Design.md §7.6 records why, in detail: investigating MLIR's actual `nvgpu.mma.sync` lowering recipe before implementing found it requires a literal `linalg.matmul` (TilingPass emits `linalg.generic`), only two hardcoded fragment shapes (not "any multiple of 16" as originally assumed here), and single-warp execution (Stage A is one thread per block) -- fitting it onto the real fused/tiled kernel is real, un-precedented, hardware-only-checkable engineering across three fronts at once, not the pipeline-wiring this pass's other stage is.
 
-**Input:**
+**Input (Stage A):**
 
 ```mlir
 // Passes 1-4 output: fused, tiled, vectorized, mask-specialized
 // affine/linalg/memref IR (see Design.md 8.2.1)
 ```
 
-**Output, Stage A:**
+**Output (Stage A):**
 
 ```mlir
-gpu.launch blocks(...) threads(...) {
-  // tiled loop nest, thread/block parallel
+gpu.launch_func @tiled_attention_kernel::@tiled_attention_kernel
+  blocks in (%numQTiles, %c1, %c1) threads in (%c1, %c1, %c1) args(...)
+gpu.module @tiled_attention_kernel {
+  gpu.func @tiled_attention_kernel(...) kernel { /* unchanged tile body */ }
 }
 ```
 
-**Output, Stage B** (applied on top of Stage A):
+**Algorithm (Stage A):**
 
-```mlir
-%A_frag = nvgpu.ldmatrix %A_shared_tile
-%B_frag = nvgpu.ldmatrix %B_shared_tile
-%C_frag = nvgpu.mma.sync %A_frag, %B_frag, %C_acc
-nvgpu.stmatrix %C_frag, %C_shared_tile
-```
+`gpu-kernel-outlining` + `gpu.launch` wrapping of TilingPass's top-level Q-tile loop, using MLIR's existing generic GPU lowering pipeline (`mlir::convertAffineLoopNestToGPULaunch`) -- no custom intrinsic-insertion logic, no dependence analysis of our own. See Design.md §7.3 for why the "obvious" `affine-parallelize`-based pipeline does not work on this project's IR.
 
-**Algorithm:**
-
-1. Stage A: `gpu-kernel-outlining` + `gpu.launch` wrapping of the tiled loop nest, using MLIR's existing generic GPU lowering pipeline -- no custom intrinsic-insertion logic.
-2. Stage B: apply MLIR's existing Transform-dialect matmul-to-`mma.sync` recipe to the QK^T/PV `linalg.matmul` ops inside the Stage A kernel, then `-convert-nvgpu-to-nvvm` for final lowering.
-
-**Tests:**
+**Tests (Stage A):**
 
 - Numerical: GPU execution matches the CPU/numpy reference at the same tolerance as §5.1.
-- PTX: `ptxas` succeeds on the emitted PTX (both stages).
-- Stage B specifically: `nvgpu.mma.sync`/`ldmatrix`/`stmatrix` appear where Stage A's output has plain `linalg.matmul`.
+- IR shape: `test/Attention/gpu_lowering.mlir` (FileCheck, done locally, no GPU hardware needed).
 
-**Performance Target:** any measured GPU speedup vs. the CPU baseline demonstrates the pipeline works end-to-end (minimum bar). Beyond that, report the measured wall-clock speedup for Stage A and Stage B, and -- if profiler validation (§5.3 Stage 3) is pursued -- measured tensor-core utilization and occupancy. No fixed target number is required going in; consistent with this project's non-goal (§1) of beating FlashAttention-2, the measured number and the gap it reveals are the result, not a bar to clear.
+**Tensor cores (Stage B) -- standalone microbenchmark, Design.md §7.6:** a bare `linalg.matmul` at MLIR's tensor-core recipe's native shape (`16x4 @ 4x8 -> 16x8`, tf32), inside a single-warp `gpu.launch`, rewritten via `transform.nvgpu.rewrite_matmul_as_mma_sync`, lowered end-to-end via the existing `-gpu-lower-to-nvvm-pipeline`, compared wall-clock against the same matmul shape lowered through Stage A's plain path. Closely mirrors an existing upstream MLIR integration test (`mlir/test/Integration/GPU/CUDA/TensorCore/sm80/transform-mma-sync-matmul-f32.mlir`) that is itself hardware-executed and numerically checked as part of LLVM's own CI on Ampere-class GPUs -- chosen specifically to minimize novel, only-checkable-on-paid-hardware engineering, at the cost of not measuring tensor cores on the actual FA kernel (see Design.md §7.6 "What this sacrifices").
 
-**Justification:** FA2 technique, shows backend-specific optimization, demonstrates the gap between high-level fusion and hardware exploitation -- and, per the project's own thesis, tests whether that gap can be closed by driving existing compiler infrastructure rather than hand-writing it.
+**Performance Target:** any measured GPU speedup vs. the CPU baseline demonstrates the pipeline works end-to-end (minimum bar), for Stage A. Beyond that, report the measured wall-clock speedup for Stage A and, separately, the standalone tensor-core microbenchmark, and -- if profiler validation (§5.3 Stage 3) is pursued -- measured tensor-core utilization and occupancy on that microbenchmark. No fixed target number is required going in; consistent with this project's non-goal (§1) of beating FlashAttention-2, the measured number and the gap it reveals are the result, not a bar to clear.
+
+**Justification:** FA2 technique, shows backend-specific optimization, demonstrates the gap between high-level fusion and hardware exploitation -- and, per the project's own thesis, tests whether that gap can be closed by driving existing compiler infrastructure rather than hand-writing it. The Stage A/Stage B split additionally demonstrates, concretely, where that gap-closing approach itself runs out of "just wire it up" and turns into real kernel-authoring engineering -- itself a compiler-limitations finding (§1).
 
 **Commands:** (illustrative -- exact flags depend on implementation)
 
 ```bash
 # Stage A: lower and run on GPU
-./build/bin/attention-opt test/Attention/gpu_lowering.mlir --gpu-lowering-pass="stage=a" \
+./build/bin/attention-opt test/Attention/gpu_lowering.mlir --gpu-lowering-pass \
   | mlir-translate --mlir-to-nvvmir | ptxas --gpu-name=sm_89 -o kernel.ptx
 
-# Stage B: same, with tensor-core lowering applied
-./build/bin/attention-opt test/Attention/gpu_lowering.mlir --gpu-lowering-pass="stage=b" \
-  | mlir-translate --mlir-to-nvvmir | ptxas --gpu-name=sm_89 -o kernel.ptx
-grep "mma.sync" kernel.ptx
+# Stage B: standalone tensor-core microbenchmark (separate artifact, not
+# chained onto attention-opt's pipeline -- see Design.md §7.6)
+mlir-opt benchmarks/mlir/tensor_core_matmul.mlir -transform-interpreter \
+  -test-transform-dialect-erase-schedule \
+  -gpu-lower-to-nvvm-pipeline="cubin-chip=sm_89 cubin-features=+ptx76" \
+  | mlir-runner --shared-libs=%mlir_cuda_runtime --shared-libs=%mlir_runner_utils \
+    --entry-point-result=void
 ```
 
 ---
@@ -584,7 +580,8 @@ Ablation means testing each pass independently to measure its contribution. We p
 |+ Vectorization|+ Vectorization|Measure vectorization's contribution|
 |+ Mask Specialization|+ Mask Specialization|Measure mask specialization's contribution|
 |+ GPU (Stage A)|+ GPU, no tensor cores (§4.5)|Measure the cost/benefit of moving to GPU execution|
-|+ GPU (Stage B)|+ tensor cores (§4.5)|Measure tensor-core lowering's contribution|
+
+**Tensor cores are measured separately, not as a further rung on this ladder** (rescoped 2026-09-01, Design.md §7.6): Stage B is a standalone microbenchmark (an isolated matmul at the tensor-core recipe's native shape, not Passes 1-4's actual kernel), so it reports a separate number -- "tensor-core speedup on the primitive MLIR's recipe supports" -- rather than a "+ GPU (Stage B)" cumulative row. See §4.5 and Design.md §7.6 for why, and for what full integration into this ladder would still require.
 
 **Why This Matters:**
 
@@ -602,11 +599,16 @@ This ablation study is the research contribution. It answers:
 |+ Vectorization|4.85x|
 |+ Mask Specialization|7.53x|
 |+ GPU (Stage A)|pending Stage 2|
-|+ GPU (Stage B)|pending Stage 2/3|
+
+**Separate measurement (Design.md §7.6, not part of the ladder above):**
+
+|Measurement|Result|
+|---|---|
+|Tensor-core matmul (isolated, native recipe shape) vs. same shape, no tensor cores|pending Stage 2|
 
 Measured at seq=32x32, head_dim=16, tile=8, causal mask -- the shape small enough that Vectorization's JIT-compile-time ceiling (Design.md §5.3) doesn't apply to any ladder step. Not directly comparable to Passes 1-2's own production-scale benchmark (Design.md §8.2.1, 1.36x-1.49x) since that uses a different shape; this table measures each pass's cumulative contribution at one fixed shape, not absolute production-scale performance.
 
-**Analysis:** Vectorization contributes the largest single delta measured so far (3.44x, from 1.41x to 4.85x); Mask Specialization adds a further 1.55x on top. The GPU rows are what Stage 2/3 will fill in -- comparing the compiler-recovered GPU number against torch.compile and FlashAttention-2 (§6.2-6.3) is the actual gap analysis this project is aiming to produce.
+**Analysis:** Vectorization contributes the largest single delta measured so far (3.44x, from 1.41x to 4.85x); Mask Specialization adds a further 1.55x on top. The GPU (Stage A) row and the separate tensor-core measurement are what Stage 2/3 will fill in -- comparing both the compiler-recovered GPU number and the isolated tensor-core number against torch.compile and FlashAttention-2 (§6.2-6.3) is the actual gap analysis this project is aiming to produce.
 
 **Commands:**
 

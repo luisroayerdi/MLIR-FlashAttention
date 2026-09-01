@@ -2,6 +2,7 @@ set(LIBS
     MLIRArithDialect
     MLIROptLib
     MLIRRegisterAllDialects
+    MLIRRegisterAllExtensions
     MLIRRegisterAllPasses
     MLIRAttention
   )
