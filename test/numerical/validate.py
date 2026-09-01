@@ -21,7 +21,7 @@ import sys
 import numpy as np
 
 from codegen import emit_module
-from pipeline import Toolchain, run_module
+from pipeline import Toolchain, run_module, run_module_gpu
 from reference import attention_reference
 
 MAX_ERROR_TOL = 1e-5
@@ -31,12 +31,20 @@ WITHIN_TOL_FRACTION = 0.999
 
 def run_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
              seed: int, use_mask: bool, tools: Toolchain, verbose: bool = True,
-             vectorize: bool = False, mask_specialize: bool = False) -> bool:
+             vectorize: bool = False, mask_specialize: bool = False,
+             gpu: bool = False) -> bool:
     if seq_q % tile_size or seq_k % tile_size:
         raise ValueError(
             f"seq_q ({seq_q}) and seq_k ({seq_k}) must be divisible by "
             f"tile_size ({tile_size}); TilingPass only supports full tiles "
             f"(see Design.md 4.6 Known Limitations)."
+        )
+    if gpu and vectorize:
+        raise ValueError(
+            "gpu=True does not yet support vectorize=True -- "
+            "-gpu-lower-to-nvvm-pipeline is missing --lower-vector-multi-"
+            "reduction/--convert-ub-to-llvm (see pipeline.py's GPU section "
+            "comment and TRADEOFFS.md)."
         )
 
     rng = np.random.default_rng(seed)
@@ -52,16 +60,23 @@ def run_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
 
     expected = attention_reference(Q, K, V, scale, mask)
 
-    module_text = emit_module(Q, K, V, scale, mask)
-    actual = np.array(run_module(module_text, tile_size, tools, vectorize=vectorize,
-                                  mask_specialize=mask_specialize),
-                       dtype=np.float32)
+    module_text = emit_module(Q, K, V, scale, mask, gpu=gpu)
+    if gpu:
+        tools.check_gpu()
+        raw = run_module_gpu(module_text, tile_size, tools,
+                              mask_specialize=mask_specialize)
+    else:
+        raw = run_module(module_text, tile_size, tools, vectorize=vectorize,
+                          mask_specialize=mask_specialize)
+    actual = np.array(raw, dtype=np.float32)
 
     tags = []
     if vectorize:
         tags.append("vectorized")
     if mask_specialize:
         tags.append("mask-specialized")
+    if gpu:
+        tags.append("GPU")
     tag = f"[{', '.join(tags)}] " if tags else ""
     if actual.shape != expected.shape:
         print(f"FAIL  {tag}seq_q={seq_q} seq_k={seq_k} head_dim={head_dim} "
@@ -111,6 +126,15 @@ def main() -> int:
                          help="also apply --mask-specialization-pass (Pass 4, "
                               "only affects masked configs) and validate its "
                               "output against the same reference")
+    parser.add_argument("--gpu", action="store_true",
+                         help="Pass 5 Stage A (§5.3): execute on GPU via "
+                              "--gpu-lowering-pass instead of CPU mlir-runner "
+                              "-- Design.md 7.2's own explicit test "
+                              "requirement (GPU execution matches the CPU/"
+                              "numpy reference). Only runs against an LLVM "
+                              "build with NVPTX + the CUDA runtime enabled "
+                              "(not this Mac build -- Stage 2 hardware only). "
+                              "Not yet compatible with --vectorize.")
     parser.add_argument("--suite", action="store_true",
                          help="run the default sweep of small configs instead "
                               "of a single case")
@@ -118,7 +142,7 @@ def main() -> int:
 
     tools = Toolchain.discover()
     try:
-        tools.check()
+        tools.check_gpu() if args.gpu else tools.check()
     except RuntimeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -126,7 +150,7 @@ def main() -> int:
     if args.suite:
         results = [
             run_case(sq, sk, hd, ts, args.seed, mask, tools, vectorize=args.vectorize,
-                     mask_specialize=args.mask_specialize)
+                     mask_specialize=args.mask_specialize, gpu=args.gpu)
             for sq, sk, hd, ts, mask in DEFAULT_SUITE
         ]
         n_pass = sum(results)
@@ -138,7 +162,8 @@ def main() -> int:
     head_dim = args.head_dim or 4
     tile_size = args.tile_size or 4
     ok = run_case(seq_q, seq_k, head_dim, tile_size, args.seed, args.mask, tools,
-                  vectorize=args.vectorize, mask_specialize=args.mask_specialize)
+                  vectorize=args.vectorize, mask_specialize=args.mask_specialize,
+                  gpu=args.gpu)
     return 0 if ok else 1
 
 

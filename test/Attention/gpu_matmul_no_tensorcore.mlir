@@ -77,13 +77,20 @@ func.func @matmul_naive() {
     }
   }
 
+  // gpu.host_register before gpu.launch, on every memref the kernel touches
+  // -- see gpu_tensor_core_matmul.mlir for why this ordering matters.
+  %ulhs = memref.cast %lhs : !lhs_t to memref<*xf32>
+  %urhs = memref.cast %rhs : !rhs_t to memref<*xf32>
+  %ures = memref.cast %res : !res_t to memref<*xf32>
+  gpu.host_register %ulhs : memref<*xf32>
+  gpu.host_register %urhs : memref<*xf32>
+  gpu.host_register %ures : memref<*xf32>
+
   gpu.launch blocks(%bx, %by, %bz) in (%gx = %c1, %gy = %c1, %gz = %c1)
              threads(%tx, %ty, %tz) in (%bxs = %c1, %bys = %c1, %bzs = %c1) {
     linalg.matmul ins(%lhs, %rhs : !lhs_t, !rhs_t) outs(%res : !res_t)
     gpu.terminator
   }
-
-  %ures = memref.cast %res : !res_t to memref<*xf32>
   gpu.host_register %ures : memref<*xf32>
   call @printMemrefF32(%ures) : (memref<*xf32>) -> ()
   // CHECK-RESULT: [112, 119, 126, 133, 140, 147, 154, 161],

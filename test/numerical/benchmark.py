@@ -33,7 +33,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from bench_codegen import emit_baseline_module, emit_fused_input_module
-from pipeline import Toolchain, run_baseline_timed, run_fused_timed
+from pipeline import Toolchain, run_baseline_timed, run_fused_timed, run_fused_timed_gpu
 from validate import run_case
 
 SPEEDUP_THRESHOLD = 1.2  # Requirements.md 5.2 acceptance criterion
@@ -70,12 +70,17 @@ def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
                 seed: int, use_mask: bool, tools: Toolchain,
                 trials: int = 5, warmup_iters: int = 5,
                 timed_iters: int = 50, vectorize: bool = False,
-                mask_specialize: bool = False,
+                mask_specialize: bool = False, gpu: bool = False,
                 threshold: float = SPEEDUP_THRESHOLD) -> bool:
     if seq_q % tile_size or seq_k % tile_size:
         raise ValueError(
             f"seq_q ({seq_q}) and seq_k ({seq_k}) must be divisible by "
             f"tile_size ({tile_size}); TilingPass only supports full tiles."
+        )
+    if gpu and vectorize:
+        raise ValueError(
+            "gpu=True does not yet support vectorize=True -- see "
+            "pipeline.py's GPU section comment and TRADEOFFS.md."
         )
 
     tags = []
@@ -83,13 +88,15 @@ def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
         tags.append("vectorized")
     if mask_specialize:
         tags.append("mask-specialized")
+    if gpu:
+        tags.append("GPU")
     label = (f"seq_q={seq_q} seq_k={seq_k} head_dim={head_dim} "
              f"tile={tile_size} mask={use_mask}"
              f"{' ' + ','.join(tags) if tags else ''}")
 
     correct = run_case(seq_q, seq_k, head_dim, tile_size, seed, use_mask,
                         tools, verbose=False, vectorize=vectorize,
-                        mask_specialize=mask_specialize)
+                        mask_specialize=mask_specialize, gpu=gpu)
     if not correct:
         print(f"FAIL  {label}: numerical correctness check failed "
               f"(see validate.py) -- skipping timing, per 5.2 'STOP' rule")
@@ -102,18 +109,26 @@ def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
     scale = float(1.0 / np.sqrt(head_dim))
     mask = np.triu(np.ones((seq_q, seq_k), dtype=bool), k=1) if use_mask else None
 
+    # The baseline side always runs on CPU, gpu=True or not -- Requirements.md
+    # 6.4's ablation table reports every rung's speedup against the same
+    # fixed CPU-unfused reference point (Design.md 7.6), not a GPU-executed
+    # baseline. Only the "fused" side switches execution target.
+    fused_module_fn = lambda: emit_fused_input_module(  # noqa: E731
+        Q, K, V, scale, mask, warmup_iters, timed_iters, gpu=gpu)
+    if gpu:
+        fused_run_fn = lambda m: run_fused_timed_gpu(  # noqa: E731
+            m, tile_size, tools, mask_specialize=mask_specialize)
+    else:
+        fused_run_fn = lambda m: run_fused_timed(  # noqa: E731
+            m, tile_size, tools, vectorize=vectorize, mask_specialize=mask_specialize)
+
     try:
         baseline_times = _trial_times(
             lambda: emit_baseline_module(Q, K, V, scale, mask, warmup_iters, timed_iters),
             lambda m: run_baseline_timed(m, tools),
             trials, timed_iters,
         )
-        fused_times = _trial_times(
-            lambda: emit_fused_input_module(Q, K, V, scale, mask, warmup_iters, timed_iters),
-            lambda m: run_fused_timed(m, tile_size, tools, vectorize=vectorize,
-                                       mask_specialize=mask_specialize),
-            trials, timed_iters,
-        )
+        fused_times = _trial_times(fused_module_fn, fused_run_fn, trials, timed_iters)
     except RuntimeError as e:
         print(f"FAIL  {label}: execution error\n{e}")
         return BenchResult(False, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -279,6 +294,15 @@ def main() -> int:
                               "against the unfused baseline, gated at the >1.5x "
                               "Go/No-Go threshold instead of 5.2's >1.2x; "
                               "overrides --vectorize/--mask-specialize")
+    parser.add_argument("--gpu", action="store_true",
+                         help="Pass 5 Stage A (Requirements.md 5.3): run the "
+                              "fused side via --gpu-lowering-pass and GPU "
+                              "execution instead of CPU mlir-runner (the "
+                              "unfused baseline always stays CPU -- see "
+                              "Design.md 7.6). Only against an LLVM build "
+                              "with NVPTX + the CUDA runtime (Stage 2 "
+                              "hardware only, not this Mac build). Not yet "
+                              "compatible with --vectorize or --full-pipeline.")
     parser.add_argument("--trials", type=int, default=5,
                          help="independent subprocess trials per config")
     parser.add_argument("--warmup-iters", type=int, default=5)
@@ -288,9 +312,15 @@ def main() -> int:
                               "single case")
     args = parser.parse_args()
 
+    if args.gpu and args.full_pipeline:
+        print("error: --gpu does not yet support --full-pipeline (implies "
+              "--vectorize, which --gpu does not yet support -- see "
+              "pipeline.py's GPU section comment)", file=sys.stderr)
+        return 2
+
     tools = Toolchain.discover()
     try:
-        tools.check()
+        tools.check_gpu() if args.gpu else tools.check()
     except RuntimeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -346,7 +376,7 @@ def main() -> int:
         results = [
             bench_case(sq, sk, hd, ts, args.seed, mask, tools,
                        args.trials, args.warmup_iters, args.timed_iters,
-                       vectorize=args.vectorize)
+                       vectorize=args.vectorize, gpu=args.gpu)
             for sq, sk, hd, ts, mask in suite
         ]
         n_pass = sum(r.ok for r in results)
@@ -360,7 +390,7 @@ def main() -> int:
     tile_size = args.tile_size or 32
     result = bench_case(seq_q, seq_k, head_dim, tile_size, args.seed, args.mask,
                          tools, args.trials, args.warmup_iters, args.timed_iters,
-                         vectorize=args.vectorize)
+                         vectorize=args.vectorize, gpu=args.gpu)
     return 0 if result.ok else 1
 
 

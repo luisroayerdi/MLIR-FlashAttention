@@ -24,11 +24,13 @@ run -- no per-call subprocess overhead.
 import numpy as np
 
 from codegen import (Shapes, call_args_text, globals_block,
-                      load_globals_block, shapes_of, unfused_func_text)
+                      gpu_host_register_block, load_globals_block, shapes_of,
+                      unfused_func_text)
 
 
 def _timed_main(s: Shapes, scale: float, func_name: str,
-                 warmup_iters: int, timed_iters: int) -> str:
+                 warmup_iters: int, timed_iters: int, gpu: bool = False) -> str:
+    gpu_registers = f"\n{gpu_host_register_block(s)}\n" if gpu else ""
     return f"""
   func.func private @rtclock() -> f64
   func.func private @printF64(f64)
@@ -37,7 +39,7 @@ def _timed_main(s: Shapes, scale: float, func_name: str,
   func.func @main() {{
 {load_globals_block(s, scale)}
     %output = memref.alloc() : {s.outT}
-
+{gpu_registers}
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %warmup = arith.constant {warmup_iters} : index
@@ -67,15 +69,19 @@ def _timed_main(s: Shapes, scale: float, func_name: str,
 
 def emit_fused_input_module(Q: np.ndarray, K: np.ndarray, V: np.ndarray,
                              scale: float, mask: np.ndarray | None,
-                             warmup_iters: int, timed_iters: int) -> str:
+                             warmup_iters: int, timed_iters: int,
+                             gpu: bool = False) -> str:
     """`@attention_unfused` (linalg.softmax form) + a timed calling loop.
-    Feed through `attention-opt --fusion-pass --tiling-pass` before lowering.
-    """
+    Feed through `attention-opt --fusion-pass --tiling-pass` before lowering
+    (add `--gpu-lowering-pass` too when `gpu=True` -- this only controls
+    whether the module's own `@main` registers its memrefs with
+    gpu.host_register before the timed loop; see codegen.py's
+    gpu_host_register_block)."""
     s = shapes_of(Q, K, V, mask)
     return f"""module {{
 {globals_block(Q, K, V, mask, s)}
 {unfused_func_text(s)}
-{_timed_main(s, scale, "attention_unfused", warmup_iters, timed_iters)}
+{_timed_main(s, scale, "attention_unfused", warmup_iters, timed_iters, gpu=gpu)}
 }}
 """
 

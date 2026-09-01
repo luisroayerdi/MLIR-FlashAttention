@@ -114,6 +114,33 @@ def call_args_text(s: Shapes) -> str:
     return f"%Q, %K, %V, %scale{mask_arg}"
 
 
+def gpu_host_register_block(s: Shapes, output_name: str = "output") -> str:
+    """gpu.host_register calls for every memref the kernel touches (Q, K, V,
+    mask if present, output), each `memref.cast` to unranked first --
+    matching the pattern MLIR's own upstream tensor-core test uses (see
+    test/Attention/gpu_tensor_core_matmul.mlir).
+
+    Must be emitted BEFORE the call/loop that Pass 5 Stage A
+    (--gpu-lowering-pass) will wrap in gpu.launch -- host_register makes a
+    host allocation dereferenceable from device code; doing it after the
+    kernel has already run doesn't fail loudly, it silently reads
+    uninitialized/invalid device memory. See TRADEOFFS.md "GPU execution:
+    gpu.host_register ordering" for how this was first gotten wrong in the
+    Stage B microbenchmark files.
+    """
+    entries = [("Q", s.qT, "f32"), ("K", s.kT, "f32"), ("V", s.kT, "f32")]
+    if s.has_mask:
+        entries.append(("mask", s.maskT, "i1"))
+    entries.append((output_name, f"memref<{s.seq_q}x{s.head_dim}xf32>", "f32"))
+
+    lines = []
+    for name, ty, elem in entries:
+        u = f"%u{name}"
+        lines.append(f"    {u} = memref.cast %{name} : {ty} to memref<*x{elem}>")
+        lines.append(f"    gpu.host_register {u} : memref<*x{elem}>")
+    return "\n".join(lines)
+
+
 def unfused_func_text(s: Shapes) -> str:
     """The `@attention_unfused` function body: QK^T -> scale -> mask (optional)
     -> linalg.softmax -> PV matmul. This is the exact pattern FusionPass
@@ -208,8 +235,9 @@ func.func @attention_unfused(
 
 
 def emit_module(Q: np.ndarray, K: np.ndarray, V: np.ndarray, scale: float,
-                 mask: np.ndarray | None = None) -> str:
+                 mask: np.ndarray | None = None, gpu: bool = False) -> str:
     s = shapes_of(Q, K, V, mask)
+    gpu_registers = f"\n{gpu_host_register_block(s)}\n" if gpu else ""
 
     module = f"""module {{
 {globals_block(Q, K, V, mask, s)}
@@ -219,7 +247,7 @@ def emit_module(Q: np.ndarray, K: np.ndarray, V: np.ndarray, scale: float,
   func.func @main() {{
 {load_globals_block(s, scale)}
     %output = memref.alloc() : {s.outT}
-
+{gpu_registers}
     call @attention_unfused({call_args_text(s)}, %output)
       : {s.call_sig_types}
 
