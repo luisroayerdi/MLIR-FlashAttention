@@ -126,3 +126,88 @@ func.func @matmul_naive() {
 }
 
 func.func private @printMemrefF32(memref<*xf32>)
+
+// ── Timed benchmark -- see gpu_tensor_core_matmul.mlir's matching section
+// for the full rationale (same design: kernel-launch logic factored into
+// its own function so warmup/timed loops share one gpu.launch site,
+// linalg.fill re-zeroing before each call since linalg.matmul
+// accumulates). @matmul_naive above is untouched.
+//
+// -convert-linalg-to-loops needed here too (both @matmul_naive's matmul
+// and this section's linalg.fill/linalg.matmul) -- same reason as RUN-GPU
+// above.
+//
+// RUN-GPU-TIMED: mlir-opt %s \
+// RUN-GPU-TIMED:   -gpu-kernel-outlining -convert-linalg-to-loops \
+// RUN-GPU-TIMED:   -gpu-lower-to-nvvm-pipeline="cubin-chip=sm_89 cubin-features=+ptx78 cubin-format=bin" \
+// RUN-GPU-TIMED: | mlir-runner \
+// RUN-GPU-TIMED:   --shared-libs=%mlir_cuda_runtime --shared-libs=%mlir_runner_utils \
+// RUN-GPU-TIMED:   -e main --entry-point-result=void
+
+func.func private @rtclock() -> f64
+func.func private @printF64(f64)
+func.func private @printNewline()
+
+func.func @matmul_naive_once(%lhs: !lhs_t, %rhs: !rhs_t, %res: !res_t) {
+  %c1 = arith.constant 1 : index
+  %f0 = arith.constant 0.000000e+00 : f32
+  linalg.fill ins(%f0 : f32) outs(%res : !res_t)
+  gpu.launch blocks(%bx, %by, %bz) in (%gx = %c1, %gy = %c1, %gz = %c1)
+             threads(%tx, %ty, %tz) in (%bxs = %c1, %bys = %c1, %bzs = %c1) {
+    linalg.matmul ins(%lhs, %rhs : !lhs_t, !rhs_t) outs(%res : !res_t)
+    gpu.terminator
+  }
+  return
+}
+
+func.func @main() {
+  %lhs = memref.alloc() : !lhs_t
+  %rhs = memref.alloc() : !rhs_t
+  %res = memref.alloc() : !res_t
+
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %M = memref.dim %res, %c0 : !res_t
+  %N = memref.dim %res, %c1 : !res_t
+  %K = memref.dim %lhs, %c1 : !lhs_t
+
+  scf.for %r = %c0 to %M step %c1 {
+    scf.for %c = %c0 to %K step %c1 {
+      %v = func.call @compute_linspace_val(%r, %c, %K) : (index, index, index) -> f32
+      memref.store %v, %lhs[%r, %c] : !lhs_t
+    }
+  }
+  scf.for %r = %c0 to %K step %c1 {
+    scf.for %c = %c0 to %N step %c1 {
+      %v = func.call @compute_linspace_val(%r, %c, %N) : (index, index, index) -> f32
+      memref.store %v, %rhs[%r, %c] : !rhs_t
+    }
+  }
+
+  %ulhs = memref.cast %lhs : !lhs_t to memref<*xf32>
+  %urhs = memref.cast %rhs : !rhs_t to memref<*xf32>
+  %ures = memref.cast %res : !res_t to memref<*xf32>
+  gpu.host_register %ulhs : memref<*xf32>
+  gpu.host_register %urhs : memref<*xf32>
+  gpu.host_register %ures : memref<*xf32>
+
+  // Same warmup=5/timed=50 convention as bench_codegen.py's CPU benchmark
+  // and gpu_tensor_core_matmul.mlir's @main.
+  %warmup = arith.constant 5 : index
+  %iters = arith.constant 50 : index
+
+  scf.for %i = %c0 to %warmup step %c1 {
+    func.call @matmul_naive_once(%lhs, %rhs, %res) : (!lhs_t, !rhs_t, !res_t) -> ()
+  }
+
+  %t0 = func.call @rtclock() : () -> f64
+  scf.for %i = %c0 to %iters step %c1 {
+    func.call @matmul_naive_once(%lhs, %rhs, %res) : (!lhs_t, !rhs_t, !res_t) -> ()
+  }
+  %t1 = func.call @rtclock() : () -> f64
+
+  %elapsed = arith.subf %t1, %t0 : f64
+  func.call @printF64(%elapsed) : (f64) -> ()
+  func.call @printNewline() : () -> ()
+  return
+}
