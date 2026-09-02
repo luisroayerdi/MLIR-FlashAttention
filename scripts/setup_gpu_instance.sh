@@ -20,6 +20,9 @@
 #   --jobs N           Parallel build jobs                 (default: nproc)
 #   --cubin-chip CHIP  Target GPU compute capability        (default: sm_89, RTX 4090/Ada
 #                      -- Design.md 7.2; pass e.g. sm_80 for an A100 Stage 3 instance)
+#   --hardware-label L Provenance label for the final `analyze_ablation.py
+#                      --collect --hardware` command (e.g. "RTX 4090
+#                      (Vast.ai)") -- no default provider assumed
 #   --skip-sanity      Skip the CPU-only regression check at the end
 #   -h, --help         Show this help and exit
 #
@@ -67,6 +70,10 @@ REPO_DIR="${REPO_DIR:-$HOME/MLIR-FlashAttention}"
 # machine without it (e.g. macOS during review).
 JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 CUBIN_CHIP="${CUBIN_CHIP:-sm_89}"  # RTX 4090 (Ada) -- Design.md 7.2
+# Provenance label for analyze_ablation.py --collect (Requirements.md 5.3) --
+# no default provider assumed; pass --hardware-label or set the env var to
+# whichever marketplace this instance is actually on.
+HARDWARE_LABEL="${HARDWARE_LABEL:-RTX 4090 (unset -- pass --hardware-label)}"
 SKIP_SANITY=0
 
 while [[ $# -gt 0 ]]; do
@@ -75,8 +82,9 @@ while [[ $# -gt 0 ]]; do
     --repo-dir) REPO_DIR="$2"; shift 2 ;;
     --jobs) JOBS="$2"; shift 2 ;;
     --cubin-chip) CUBIN_CHIP="$2"; shift 2 ;;
+    --hardware-label) HARDWARE_LABEL="$2"; shift 2 ;;
     --skip-sanity) SKIP_SANITY=1; shift ;;
-    -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,49p' "$0"; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -292,6 +300,6 @@ cat <<EOF
   git -C $REPO_DIR rev-parse HEAD
 
   # Append to results/ablation.csv with provenance built in:
-  python3 benchmarks/analyze_ablation.py --collect --hardware "RTX 4090 (RunPod)"
+  python3 benchmarks/analyze_ablation.py --collect --hardware "$HARDWARE_LABEL"
 
 EOF
