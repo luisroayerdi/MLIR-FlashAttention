@@ -43,9 +43,14 @@
 // RUN-GPU: mlir-opt %s \
 // RUN-GPU:   -transform-interpreter -test-transform-dialect-erase-schedule \
 // RUN-GPU:   -gpu-lower-to-nvvm-pipeline="cubin-chip=sm_89 cubin-features=+ptx78 cubin-format=bin" \
+// -e matmul_tensorcore: mlir-runner's -e defaults to "main" (see
+// mlir/lib/ExecutionEngine/JitRunner.cpp), but this file's entry function
+// is @matmul_tensorcore, not @main (unlike the upstream test it mirrors,
+// which does use @main) -- found live, "Error: entry point not found".
+//
 // RUN-GPU: | mlir-runner \
 // RUN-GPU:   --shared-libs=%mlir_cuda_runtime --shared-libs=%mlir_runner_utils \
-// RUN-GPU:   --entry-point-result=void \
+// RUN-GPU:   -e matmul_tensorcore --entry-point-result=void \
 // RUN-GPU: | FileCheck %s --check-prefix=CHECK-RESULT
 
 !lhs_t = memref<16x4xf32>

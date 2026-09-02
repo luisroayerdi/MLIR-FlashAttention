@@ -36,9 +36,13 @@
 // RUN-GPU: mlir-opt %s \
 // RUN-GPU:   -gpu-kernel-outlining -convert-linalg-to-loops \
 // RUN-GPU:   -gpu-lower-to-nvvm-pipeline="cubin-chip=sm_89 cubin-features=+ptx78 cubin-format=bin" \
+// -e matmul_naive: mlir-runner's -e defaults to "main", but this file's
+// entry function is @matmul_naive -- see gpu_tensor_core_matmul.mlir for
+// the same gotcha, found live there first.
+//
 // RUN-GPU: | mlir-runner \
 // RUN-GPU:   --shared-libs=%mlir_cuda_runtime --shared-libs=%mlir_runner_utils \
-// RUN-GPU:   --entry-point-result=void \
+// RUN-GPU:   -e matmul_naive --entry-point-result=void \
 // RUN-GPU: | FileCheck %s --check-prefix=CHECK-RESULT
 
 !lhs_t = memref<16x4xf32>

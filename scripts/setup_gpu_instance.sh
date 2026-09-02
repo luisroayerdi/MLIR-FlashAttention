@@ -280,14 +280,18 @@ cat <<EOF
   # MLIR_INCLUDE_TESTS in mlir-opt.cpp) that attention-opt never links --
   # registerAllPasses()/registerAllExtensions() cover production passes
   # only, not MLIR's own test-pass registry. Found live: attention-opt
-  # rejected the flag outright ("Unknown command line argument").
+  # rejected the flag outright ("Unknown command line argument"). Also:
+  # -e matmul_tensorcore/-e matmul_naive below -- mlir-runner's -e defaults
+  # to "main" (mlir/lib/ExecutionEngine/JitRunner.cpp), but neither file's
+  # entry function is named @main (unlike the upstream test they mirror) --
+  # found live, "Error: entry point not found".
   $LLVM_DIR/build/bin/mlir-opt test/Attention/gpu_tensor_core_matmul.mlir \\
     -transform-interpreter -test-transform-dialect-erase-schedule \\
     -gpu-lower-to-nvvm-pipeline="cubin-chip=$CUBIN_CHIP cubin-features=+ptx78 cubin-format=bin" \\
     | $LLVM_DIR/build/bin/mlir-runner \\
       --shared-libs=$LLVM_DIR/build/lib/libmlir_cuda_runtime.so \\
       --shared-libs=$LLVM_DIR/build/lib/libmlir_runner_utils.so \\
-      --entry-point-result=void
+      -e matmul_tensorcore --entry-point-result=void
 
   # -convert-linalg-to-loops before the NVVM pipeline: -gpu-lower-to-nvvm-
   # pipeline has no linalg-lowering step of its own (by design -- upstream
@@ -303,7 +307,7 @@ cat <<EOF
     | $LLVM_DIR/build/bin/mlir-runner \\
       --shared-libs=$LLVM_DIR/build/lib/libmlir_cuda_runtime.so \\
       --shared-libs=$LLVM_DIR/build/lib/libmlir_runner_utils.so \\
-      --entry-point-result=void
+      -e matmul_naive --entry-point-result=void
 
   # Record it (NOTES.md's "Experiment execution workflow" step 3 --
   # provenance to save alongside the numbers above, before disconnecting):
