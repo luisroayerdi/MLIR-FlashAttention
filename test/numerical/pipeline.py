@@ -194,17 +194,39 @@ def run_fused_timed(module_text: str, tile_size: int, tools: Toolchain,
 # ── GPU (Stage 2) execution ─────────────────────────────────────────────────
 #
 # Design.md 7.6 / TRADEOFFS.md: the NVVM pipeline used here
-# (-gpu-lower-to-nvvm-pipeline) is missing --lower-vector-multi-reduction and
-# --convert-ub-to-llvm, the two extra passes vectorized output needs on CPU
-# too (see TRADEOFFS.md "Vectorization pass: wired into the numerical/
-# benchmark harness..."). So none of the functions below support
-# vectorize=True -- combining GPU execution with Pass 3's output is a known,
-# documented gap, not silently wrong. mask_specialize alone is fine: Pass 4
-# only introduces affine.if, which -gpu-lower-to-nvvm-pipeline's own
-# --lower-affine already handles.
+# (-gpu-lower-to-nvvm-pipeline) has no linalg/memref lowering step of its
+# own at all -- found live, on real hardware, running the full fused kernel
+# for the first time: TilingPass's tile body is almost entirely
+# linalg.generic/linalg.fill/memref.alloca, none of which that pipeline
+# touches, so it survived into final LLVM translation and failed
+# ("LLVM Translation failed for operation: builtin.unrealized_conversion_
+# cast"). _GPU_PRE_NVVM_FLAGS below is prepended to fix this -- verified
+# locally end-to-end through actual LLVM-IR generation (this Mac's LLVM
+# build has NVPTX codegen even without the CUDA runtime; only invoking
+# ptxas itself needs the real toolkit). Ordering matters: linalg must be
+# gone before affine is lowered, and affine/scf must be gone before memref
+# is finalized to llvm, or MLIR's structural invariants break (e.g.
+# affine.for requires a single-block body, and -finalize-memref-to-llvm can
+# introduce multi-block control flow) -- mirrors the order in this file's
+# own CPU-side _LOWER_FLAGS.
 #
-# None of this is runnable against this Mac build (no NVPTX, no CUDA
-# runtime) -- see Toolchain.check_gpu().
+# Also missing (same as CPU): --lower-vector-multi-reduction and
+# --convert-ub-to-llvm, needed for vectorized output (see TRADEOFFS.md
+# "Vectorization pass: wired into the numerical/benchmark harness...") --
+# so none of the functions below support vectorize=True. mask_specialize
+# alone is fine: Pass 4 only introduces affine.if, handled by the
+# --lower-affine included in _GPU_PRE_NVVM_FLAGS below.
+#
+# None of this is runnable against this Mac build (no CUDA runtime, and no
+# ptxas since that's the CUDA toolkit's, not LLVM's) -- see
+# Toolchain.check_gpu().
+
+_GPU_PRE_NVVM_FLAGS = [
+    "--convert-linalg-to-loops",
+    "--lower-affine",
+    "--convert-scf-to-cf",
+    "--finalize-memref-to-llvm",
+]
 
 
 def _gpu_nvvm_pipeline_flag() -> str:
@@ -235,7 +257,8 @@ def run_module_gpu(module_text: str, tile_size: int, tools: Toolchain,
     gpu_lowered = _run(passes, stdin=module_text)
 
     nvvm_lowered = _run(
-        [str(tools.mlir_opt), "-", _gpu_nvvm_pipeline_flag()], stdin=gpu_lowered)
+        [str(tools.mlir_opt), "-", *_GPU_PRE_NVVM_FLAGS, _gpu_nvvm_pipeline_flag()],
+        stdin=gpu_lowered)
 
     output = _run(
         [str(tools.mlir_runner), "-", "-e", "main", "-entry-point-result=void",
@@ -255,7 +278,8 @@ def _run_timed_gpu(module_text: str, tools: Toolchain) -> float:
     already-attention-opt'd module (including --gpu-lowering-pass) with
     gpu.host_register calls already in place."""
     nvvm_lowered = _run(
-        [str(tools.mlir_opt), "-", _gpu_nvvm_pipeline_flag()], stdin=module_text)
+        [str(tools.mlir_opt), "-", *_GPU_PRE_NVVM_FLAGS, _gpu_nvvm_pipeline_flag()],
+        stdin=module_text)
 
     output = _run(
         [str(tools.mlir_runner), "-", "-e", "main", "-entry-point-result=void",
