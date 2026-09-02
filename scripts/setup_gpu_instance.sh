@@ -163,6 +163,11 @@ if command -v ld.lld >/dev/null 2>&1; then
   LINKER_ARGS=(-DLLVM_USE_LINKER=lld)
 fi
 
+# LLVM_BUILD_EXAMPLES=OFF: mlir/examples/Hello does not build cleanly at
+# the pinned commit above (its own commit message: "Failed attempt to run a
+# simple mlir example") and this project never needs it -- attention-opt
+# only depends on MLIR's libraries/tools, not its example dialects. Found
+# the hard way: this build failed ~91% through without it.
 log "Configuring LLVM/MLIR (Release, NVPTX + MLIR_ENABLE_CUDA_RUNNER=ON)"
 cmake -S "$LLVM_DIR/llvm" -B "$LLVM_DIR/build" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
@@ -170,6 +175,7 @@ cmake -S "$LLVM_DIR/llvm" -B "$LLVM_DIR/build" -G Ninja \
   -DLLVM_ENABLE_PROJECTS=mlir \
   -DLLVM_TARGETS_TO_BUILD="Native;NVPTX" \
   -DMLIR_ENABLE_CUDA_RUNNER=ON \
+  -DLLVM_BUILD_EXAMPLES=OFF \
   "${CMAKE_LAUNCHER_ARGS[@]}" "${LINKER_ARGS[@]}"
 
 log "Building LLVM/MLIR (-j $JOBS) -- this is the slow step, expect 20-60+ minutes"
