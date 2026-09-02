@@ -158,18 +158,27 @@ func.func private @printMemrefF32(memref<*xf32>)
 // (@matmul_tensorcore_once) so both the warmup and timed loops invoke the
 // exact same, single gpu.launch site -- gpu-kernel-outlining outlines it
 // once; the loop is what causes it to actually launch repeatedly at
-// runtime. Re-zeroing %res via linalg.fill before each call matches how
-// @attention_unfused's own body re-initializes its intermediates on every
-// call in bench_codegen.py -- linalg.matmul accumulates onto its output
-// (C += A@B), so without this, results would grow across iterations
-// (harmless for a pure timing run, but sloppy and inconsistent with the
-// rest of this project's benchmark code).
+// runtime. Re-zeroing %res with an explicit scf.for/memref.store loop
+// (matching @matmul_tensorcore's own zero-init above, not linalg.fill)
+// before each call matches how @attention_unfused's own body
+// re-initializes its intermediates on every call in bench_codegen.py --
+// linalg.matmul accumulates onto its output (C += A@B), so without this,
+// results would grow across iterations (harmless for a pure timing run,
+// but sloppy and inconsistent with the rest of this project's benchmark
+// code). Explicit loop, not linalg.fill: found live that linalg.fill here
+// has no lowering path at all -- unlike gpu_matmul_no_tensorcore.mlir's
+// RUN-GPU-TIMED, this pipeline deliberately never runs
+// -convert-linalg-to-loops (it would risk touching linalg.matmul before
+// the transform below gets to rewrite it to nvgpu.mma.sync), so a
+// leftover linalg.fill survived all the way into mlir-runner's input,
+// which doesn't have the linalg dialect registered and failed to parse it.
 //
 // RUN-GPU-TIMED: mlir-opt %s \
 // RUN-GPU-TIMED:   -transform-interpreter -test-transform-dialect-erase-schedule \
 // RUN-GPU-TIMED:   -gpu-lower-to-nvvm-pipeline="cubin-chip=sm_89 cubin-features=+ptx78 cubin-format=bin" \
 // RUN-GPU-TIMED: | mlir-runner \
 // RUN-GPU-TIMED:   --shared-libs=%mlir_cuda_runtime --shared-libs=%mlir_runner_utils \
+// RUN-GPU-TIMED:   --shared-libs=%mlir_c_runner_utils \
 // RUN-GPU-TIMED:   -e main --entry-point-result=void
 
 func.func private @rtclock() -> f64
@@ -177,10 +186,17 @@ func.func private @printF64(f64)
 func.func private @printNewline()
 
 func.func @matmul_tensorcore_once(%lhs: !lhs_t, %rhs: !rhs_t, %res: !res_t) {
+  %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %c32 = arith.constant 32 : index
   %f0 = arith.constant 0.000000e+00 : f32
-  linalg.fill ins(%f0 : f32) outs(%res : !res_t)
+  %M = memref.dim %res, %c0 : !res_t
+  %N = memref.dim %res, %c1 : !res_t
+  scf.for %r = %c0 to %M step %c1 {
+    scf.for %c = %c0 to %N step %c1 {
+      memref.store %f0, %res[%r, %c] : !res_t
+    }
+  }
   gpu.launch blocks(%bx, %by, %bz) in (%gx = %c1, %gy = %c1, %gz = %c1)
              threads(%tx, %ty, %tz) in (%bxs = %c32, %bys = %c1, %bzs = %c1) {
     linalg.matmul ins(%lhs, %rhs : !lhs_t, !rhs_t) outs(%res : !res_t)

@@ -130,18 +130,24 @@ func.func private @printMemrefF32(memref<*xf32>)
 // ── Timed benchmark -- see gpu_tensor_core_matmul.mlir's matching section
 // for the full rationale (same design: kernel-launch logic factored into
 // its own function so warmup/timed loops share one gpu.launch site,
-// linalg.fill re-zeroing before each call since linalg.matmul
-// accumulates). @matmul_naive above is untouched.
+// explicit scf.for/memref.store re-zeroing before each call since
+// linalg.matmul accumulates -- not linalg.fill, see the tensor-core file's
+// comment for why: this file's -convert-linalg-to-loops would actually
+// have handled a linalg.fill fine, but kept both files consistent since
+// there's no cost to it). @matmul_naive above is untouched.
 //
-// -convert-linalg-to-loops needed here too (both @matmul_naive's matmul
-// and this section's linalg.fill/linalg.matmul) -- same reason as RUN-GPU
-// above.
+// -convert-linalg-to-loops needed here too (@matmul_naive's own matmul,
+// plus this section's matmul) -- same reason as RUN-GPU above.
+// --shared-libs=%mlir_c_runner_utils: rtclock/printF64/printNewline live
+// there, not in %mlir_runner_utils (which only has printMemrefF32) --
+// found live, "JIT session error: Symbols not found".
 //
 // RUN-GPU-TIMED: mlir-opt %s \
 // RUN-GPU-TIMED:   -gpu-kernel-outlining -convert-linalg-to-loops \
 // RUN-GPU-TIMED:   -gpu-lower-to-nvvm-pipeline="cubin-chip=sm_89 cubin-features=+ptx78 cubin-format=bin" \
 // RUN-GPU-TIMED: | mlir-runner \
 // RUN-GPU-TIMED:   --shared-libs=%mlir_cuda_runtime --shared-libs=%mlir_runner_utils \
+// RUN-GPU-TIMED:   --shared-libs=%mlir_c_runner_utils \
 // RUN-GPU-TIMED:   -e main --entry-point-result=void
 
 func.func private @rtclock() -> f64
@@ -149,9 +155,16 @@ func.func private @printF64(f64)
 func.func private @printNewline()
 
 func.func @matmul_naive_once(%lhs: !lhs_t, %rhs: !rhs_t, %res: !res_t) {
+  %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %f0 = arith.constant 0.000000e+00 : f32
-  linalg.fill ins(%f0 : f32) outs(%res : !res_t)
+  %M = memref.dim %res, %c0 : !res_t
+  %N = memref.dim %res, %c1 : !res_t
+  scf.for %r = %c0 to %M step %c1 {
+    scf.for %c = %c0 to %N step %c1 {
+      memref.store %f0, %res[%r, %c] : !res_t
+    }
+  }
   gpu.launch blocks(%bx, %by, %bz) in (%gx = %c1, %gy = %c1, %gz = %c1)
              threads(%tx, %ty, %tz) in (%bxs = %c1, %bys = %c1, %bzs = %c1) {
     linalg.matmul ins(%lhs, %rhs : !lhs_t, !rhs_t) outs(%res : !res_t)
