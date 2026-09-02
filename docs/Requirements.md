@@ -359,7 +359,7 @@ gpu.module @tiled_attention_kernel {
 # chained onto attention-opt's pipeline -- see Design.md §7.6)
 mlir-opt benchmarks/mlir/tensor_core_matmul.mlir -transform-interpreter \
   -test-transform-dialect-erase-schedule \
-  -gpu-lower-to-nvvm-pipeline="cubin-chip=sm_89 cubin-features=+ptx76" \
+  -gpu-lower-to-nvvm-pipeline="cubin-chip=sm_89 cubin-features=+ptx78" \
   | mlir-runner --shared-libs=%mlir_cuda_runtime --shared-libs=%mlir_runner_utils \
     --entry-point-result=void
 ```

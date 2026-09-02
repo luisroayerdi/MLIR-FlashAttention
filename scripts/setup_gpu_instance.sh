@@ -103,6 +103,19 @@ echo "GPU + CUDA toolkit look present. Provenance for later result bundles" \
      "(Requirements.md 5.3): save the two blocks above alongside every" \
      "collected number."
 
+# test/numerical/*.py use PEP 604 "X | None" annotations (no
+# `from __future__ import annotations`), which crash on import under Python
+# <3.10 -- and that's an eager, module-import-time crash, not something a
+# later step can route around. Ubuntu 20.04 images ship python3 3.8 by
+# default; Ubuntu 22.04+ ships >=3.10. If this fails, relaunch with a newer
+# base image rather than trying to patch Python versions on this one.
+command -v python3 >/dev/null 2>&1 || die "python3 not found."
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || die \
+  "python3 is $(python3 --version 2>&1 | awk "{print \$2}"), but" \
+  "test/numerical/*.py needs >=3.10 (PEP 604 \"X | None\" annotations," \
+  "evaluated eagerly on import -- no __future__ import guards them). Pick" \
+  "an Ubuntu 22.04+ base image instead of 20.04 and relaunch."
+
 # ── 2. Build dependencies ───────────────────────────────────────────────
 log "Installing build dependencies (apt)"
 if command -v sudo >/dev/null 2>&1; then SUDO=sudo; else SUDO=""; fi
@@ -111,14 +124,35 @@ $SUDO apt-get install -y --no-install-recommends \
   build-essential cmake ninja-build git python3 python3-venv python3-pip \
   ccache lld
 
-# ── 3. LLVM/MLIR, built with NVPTX + the CUDA runner ────────────────────
-log "Cloning llvm-project ($LLVM_REPO_URL @ $LLVM_COMMIT) into $LLVM_DIR"
-if [[ -d "$LLVM_DIR/.git" ]]; then
-  git -C "$LLVM_DIR" fetch origin "$LLVM_COMMIT" || git -C "$LLVM_DIR" fetch --all
-else
-  git clone "$LLVM_REPO_URL" "$LLVM_DIR"
+# LLVM/MLIR need CMake >=3.20 (mlir/CMakeLists.txt); Ubuntu 20.04's apt
+# cmake is 3.16, too old. Self-heal via pip's prebuilt cmake wheel rather
+# than just erroring -- reliable across arbitrary Vast.ai host images,
+# unlike chasing a Kitware apt repo per-distro. Compared with `sort -V`
+# (version-aware), not as a bare float -- "3.9" vs "3.10" compares backwards
+# as floating point (3.9 > 3.10) despite 3.9 being the older version.
+CMAKE_VERSION="$(cmake --version | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+OLDEST="$(printf '%s\n%s\n' "$CMAKE_VERSION" "3.20.0" | sort -V | head -1)"
+if [[ "$OLDEST" != "3.20.0" ]]; then
+  log "System cmake ($CMAKE_VERSION) is older than the 3.20 LLVM/MLIR needs -- installing a newer one via pip"
+  pip3 install --quiet --user 'cmake>=3.20'
+  export PATH="$HOME/.local/bin:$PATH"
+  hash -r
+  echo "Now using: $(command -v cmake) ($(cmake --version | head -1))"
 fi
-git -C "$LLVM_DIR" checkout "$LLVM_COMMIT"
+
+# ── 3. LLVM/MLIR, built with NVPTX + the CUDA runner ────────────────────
+log "Fetching llvm-project ($LLVM_REPO_URL @ $LLVM_COMMIT) into $LLVM_DIR"
+# Shallow, single-commit fetch, not a full clone -- llvm-project's full
+# history is tens of GB and we only ever need this one pinned commit. This
+# is billed instance time; a full clone would be pure waste. GitHub
+# supports fetching an arbitrary commit SHA directly for public repos.
+if [[ ! -d "$LLVM_DIR/.git" ]]; then
+  mkdir -p "$LLVM_DIR"
+  git -C "$LLVM_DIR" init -q
+  git -C "$LLVM_DIR" remote add origin "$LLVM_REPO_URL"
+fi
+git -C "$LLVM_DIR" fetch --depth 1 origin "$LLVM_COMMIT"
+git -C "$LLVM_DIR" checkout FETCH_HEAD
 
 CMAKE_LAUNCHER_ARGS=()
 if command -v ccache >/dev/null 2>&1; then
@@ -221,7 +255,7 @@ cat <<EOF
   # needed via registerAllDialects/registerAllExtensions.
   build/bin/attention-opt test/Attention/gpu_tensor_core_matmul.mlir \\
     -transform-interpreter -test-transform-dialect-erase-schedule \\
-    -gpu-lower-to-nvvm-pipeline="cubin-chip=$CUBIN_CHIP cubin-features=+ptx76 cubin-format=bin" \\
+    -gpu-lower-to-nvvm-pipeline="cubin-chip=$CUBIN_CHIP cubin-features=+ptx78 cubin-format=bin" \\
     | $LLVM_DIR/build/bin/mlir-runner \\
       --shared-libs=$LLVM_DIR/build/lib/libmlir_cuda_runtime.so \\
       --shared-libs=$LLVM_DIR/build/lib/libmlir_runner_utils.so \\
@@ -229,7 +263,7 @@ cat <<EOF
 
   build/bin/attention-opt test/Attention/gpu_matmul_no_tensorcore.mlir \\
     -gpu-kernel-outlining \\
-    -gpu-lower-to-nvvm-pipeline="cubin-chip=$CUBIN_CHIP cubin-features=+ptx76 cubin-format=bin" \\
+    -gpu-lower-to-nvvm-pipeline="cubin-chip=$CUBIN_CHIP cubin-features=+ptx78 cubin-format=bin" \\
     | $LLVM_DIR/build/bin/mlir-runner \\
       --shared-libs=$LLVM_DIR/build/lib/libmlir_cuda_runtime.so \\
       --shared-libs=$LLVM_DIR/build/lib/libmlir_runner_utils.so \\

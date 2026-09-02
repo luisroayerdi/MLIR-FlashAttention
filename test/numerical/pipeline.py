@@ -20,7 +20,7 @@ _SHARED_LIB_EXT = ".dylib" if sys.platform == "darwin" else ".so"
 # Matches the cubin-chip used in test/Attention/gpu_tensor_core_matmul.mlir's
 # and gpu_matmul_no_tensorcore.mlir's documented RUN-GPU lines.
 _GPU_CUBIN_CHIP = "sm_89"
-_GPU_CUBIN_FEATURES = "+ptx76"
+_GPU_CUBIN_FEATURES = "+ptx78"
 
 _LOWER_FLAGS = [
     # Vector-dialect lowering (no-ops when the input has no vector ops, i.e.

@@ -42,7 +42,7 @@
 //
 // RUN-GPU: attention-opt %s \
 // RUN-GPU:   -transform-interpreter -test-transform-dialect-erase-schedule \
-// RUN-GPU:   -gpu-lower-to-nvvm-pipeline="cubin-chip=sm_89 cubin-features=+ptx76 cubin-format=bin" \
+// RUN-GPU:   -gpu-lower-to-nvvm-pipeline="cubin-chip=sm_89 cubin-features=+ptx78 cubin-format=bin" \
 // RUN-GPU: | mlir-runner \
 // RUN-GPU:   --shared-libs=%mlir_cuda_runtime --shared-libs=%mlir_runner_utils \
 // RUN-GPU:   --entry-point-result=void \
