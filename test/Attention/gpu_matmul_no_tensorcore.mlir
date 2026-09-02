@@ -20,12 +20,21 @@
 // CHECK-OUTLINE-NOT: nvgpu.mma.sync
 
 // RUN line 2 (Stage 2, GPU instance only -- see gpu_tensor_core_matmul.mlir
-// for why this can't run against this Mac build). Same expected numeric
-// result as the tensor-core version: same matmul, same inputs, only the
-// execution strategy differs.
+// for why this can't run against this Mac build, and for why mlir-opt, not
+// attention-opt, is used here). Same expected numeric result as the
+// tensor-core version: same matmul, same inputs, only the execution
+// strategy differs.
 //
-// RUN-GPU: attention-opt %s \
-// RUN-GPU:   -gpu-kernel-outlining \
+// -convert-linalg-to-loops is required before -gpu-lower-to-nvvm-pipeline:
+// that pipeline has no linalg-lowering step of its own (upstream expects
+// linalg.matmul already rewritten, e.g. by the tensor-core transform in
+// gpu_tensor_core_matmul.mlir) -- without it linalg.matmul survives into
+// later passes with its body partially LLVM-dialect-converted underneath
+// it and fails to verify. Lowers to a single-thread sequential loop nest,
+// matching this file's single-thread launch above.
+//
+// RUN-GPU: mlir-opt %s \
+// RUN-GPU:   -gpu-kernel-outlining -convert-linalg-to-loops \
 // RUN-GPU:   -gpu-lower-to-nvvm-pipeline="cubin-chip=sm_89 cubin-features=+ptx78 cubin-format=bin" \
 // RUN-GPU: | mlir-runner \
 // RUN-GPU:   --shared-libs=%mlir_cuda_runtime --shared-libs=%mlir_runner_utils \

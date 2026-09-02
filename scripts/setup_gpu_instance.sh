@@ -274,10 +274,14 @@ cat <<EOF
 
   # Stage B: standalone tensor-core microbenchmark vs. the same shape with
   # no tensor cores (Design.md 7.6) -- exactly each file's own RUN-GPU:
-  # comment, using attention-opt (not plain mlir-opt) since that's what
-  # those comments themselves specify -- it registers every dialect/pass
-  # needed via registerAllDialects/registerAllExtensions.
-  build/bin/attention-opt test/Attention/gpu_tensor_core_matmul.mlir \\
+  # comment. Uses mlir-opt (the LLVM build's own tool), NOT attention-opt:
+  # -test-transform-dialect-erase-schedule is a *test-only* MLIR pass
+  # (mlir::test::registerTestTransformDialectEraseSchedulePass, gated on
+  # MLIR_INCLUDE_TESTS in mlir-opt.cpp) that attention-opt never links --
+  # registerAllPasses()/registerAllExtensions() cover production passes
+  # only, not MLIR's own test-pass registry. Found live: attention-opt
+  # rejected the flag outright ("Unknown command line argument").
+  $LLVM_DIR/build/bin/mlir-opt test/Attention/gpu_tensor_core_matmul.mlir \\
     -transform-interpreter -test-transform-dialect-erase-schedule \\
     -gpu-lower-to-nvvm-pipeline="cubin-chip=$CUBIN_CHIP cubin-features=+ptx78 cubin-format=bin" \\
     | $LLVM_DIR/build/bin/mlir-runner \\
@@ -285,8 +289,16 @@ cat <<EOF
       --shared-libs=$LLVM_DIR/build/lib/libmlir_runner_utils.so \\
       --entry-point-result=void
 
-  build/bin/attention-opt test/Attention/gpu_matmul_no_tensorcore.mlir \\
-    -gpu-kernel-outlining \\
+  # -convert-linalg-to-loops before the NVVM pipeline: -gpu-lower-to-nvvm-
+  # pipeline has no linalg-lowering step of its own (by design -- upstream
+  # expects linalg.matmul already rewritten, e.g. by the tensor-core
+  # transform above). Without it, linalg.matmul survives into later passes
+  # with its body partially LLVM-dialect-converted underneath it and fails
+  # to verify ("expected add/mul op in the body") -- found live on this
+  # exact command. This lowers to a single-thread sequential loop nest,
+  # matching this file's own single-thread launch (see its header comment).
+  $LLVM_DIR/build/bin/mlir-opt test/Attention/gpu_matmul_no_tensorcore.mlir \\
+    -gpu-kernel-outlining -convert-linalg-to-loops \\
     -gpu-lower-to-nvvm-pipeline="cubin-chip=$CUBIN_CHIP cubin-features=+ptx78 cubin-format=bin" \\
     | $LLVM_DIR/build/bin/mlir-runner \\
       --shared-libs=$LLVM_DIR/build/lib/libmlir_cuda_runtime.so \\

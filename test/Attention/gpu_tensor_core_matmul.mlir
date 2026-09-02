@@ -40,7 +40,7 @@
 // Ampere-generation PTX primitive Ada stays backward-compatible with, so
 // this substitution is architectural continuity (see TRADEOFFS.md).
 //
-// RUN-GPU: attention-opt %s \
+// RUN-GPU: mlir-opt %s \
 // RUN-GPU:   -transform-interpreter -test-transform-dialect-erase-schedule \
 // RUN-GPU:   -gpu-lower-to-nvvm-pipeline="cubin-chip=sm_89 cubin-features=+ptx78 cubin-format=bin" \
 // RUN-GPU: | mlir-runner \
