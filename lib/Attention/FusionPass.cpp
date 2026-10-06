@@ -18,10 +18,12 @@
 //
 // Preconditions, checked before rewriting (the pattern declines otherwise):
 //   - Q, K, V, output, and scale are f32 (attention.fused accepts only f32).
-//   - Each intermediate buffer (%qk, %sc, %mk, %p) is used only by the
-//     chain, memref.dealloc, and (for %qk) the linalg.fill that zeroes the
-//     accumulator. Fusion stops writing these buffers, so any other reader
-//     would read uninitialized memory.
+//   - Each intermediate buffer (%qk, %sc, %mk, %p) is a memref.alloc or
+//     memref.alloca in this function, used only by the chain,
+//     memref.dealloc, and (for %qk) a linalg.fill before the QK^T generic
+//     that zeroes the accumulator. Fusion stops writing these buffers, so
+//     any other reader -- including a caller, through an argument or an
+//     aliasing view -- would read uninitialized memory.
 //
 //===----------------------------------------------------------------------===//
 
@@ -107,14 +109,20 @@ static bool isF32MemRef(Value v) {
   return type && type.getElementType().isF32();
 }
 
-// True if every user of `buf` is one of `chain`, a memref.dealloc, or (when
-// `allowFill`) a linalg.fill writing `buf`.
+// True if `buf` is allocated in this function and every user of it is one of
+// `chain`, a memref.dealloc, or a linalg.fill in the same block before
+// `fillBefore` (when given). Arguments and views can be read where getUsers()
+// doesn't see them, so they are rejected.
 static bool onlyUsedByChain(Value buf, ArrayRef<Operation *> chain,
-                            bool allowFill = false) {
+                            Operation *fillBefore = nullptr) {
+  if (!isa_and_nonnull<memref::AllocOp, memref::AllocaOp>(buf.getDefiningOp()))
+    return false;
   for (Operation *user : buf.getUsers()) {
     if (llvm::is_contained(chain, user) || isa<memref::DeallocOp>(user))
       continue;
-    if (allowFill && isa<linalg::FillOp>(user))
+    if (fillBefore && isa<linalg::FillOp>(user) &&
+        user->getBlock() == fillBefore->getBlock() &&
+        user->isBeforeInBlock(fillBefore))
       continue;
     return false;
   }
@@ -193,7 +201,8 @@ struct FuseAttentionPattern : public OpRewritePattern<linalg::MatmulOp> {
     Value scaledBuf = scaleOp.getDpsInits()[0];
     Operation *scaledReader = maskOp ? maskOp.getOperation()
                                      : softmax.getOperation();
-    if (!onlyUsedByChain(qkBuf, {qkGeneric, scaleOp}, /*allowFill=*/true) ||
+    if (!onlyUsedByChain(qkBuf, {qkGeneric, scaleOp},
+                         /*fillBefore=*/qkGeneric) ||
         !onlyUsedByChain(scaledBuf, {scaleOp, scaledReader}) ||
         !onlyUsedByChain(probsBuf, {softmax, pvMatmul}))
       return failure();
