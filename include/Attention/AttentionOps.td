@@ -29,7 +29,7 @@ def Attention_FusedOp : Attention_Op<"fused", [
 
         Including V in the fused op is required for the tiling pass to introduce
         online softmax without materialising the full seq_q x seq_k attention
-        weight matrix (see Design.md §2.1 and §4).
+        weight matrix (see docs/DECISIONS.md, Dialect).
     }];
 
     let arguments = (ins

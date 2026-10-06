@@ -101,7 +101,7 @@ def MaskSpecializationPass : Pass<"mask-specialization-pass", "::mlir::func::Fun
 def GPULoweringPass : Pass<"gpu-lowering-pass", "::mlir::ModuleOp"> {
   let summary = "Stage A: wrap TilingPass's Q-tile loop in gpu.launch and outline it";
   let description = [{
-    Stage A of Pass 5 (GPU Backend Lowering, Design.md Section 7). Must run
+    Stage A of Pass 5 (GPU Backend Lowering). Must run
     after --tiling-pass: it operates on the affine.for loop nest that pass
     emits, not on attention.fused.
 
@@ -120,7 +120,7 @@ def GPULoweringPass : Pass<"gpu-lowering-pass", "::mlir::ModuleOp"> {
 
     No tensor cores, no shared-memory promotion, no custom
     intrinsic-insertion logic: this stage is pipeline wiring over existing
-    MLIR GPU infrastructure (Design.md Section 7.4), not a novel
+    MLIR GPU infrastructure (see docs/DECISIONS.md, GPU), not a novel
     pattern-matching pass. Stage B (matmul -> nvgpu.mma.sync) is separate
     and not yet implemented.
 

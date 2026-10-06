@@ -1,6 +1,6 @@
 //===- GPULoweringPass.cpp - Attention GPU lowering pass ---------*- C++ -*-===//
 //
-// Pass 5, Stage A: GPU Backend Lowering (Design.md §7)
+// Pass 5, Stage A: GPU Backend Lowering
 //
 // Wraps TilingPass's top-level Q-tile loop in a gpu.launch -- one GPU block
 // per Q tile, one thread per block, so the inner K/V loop stays a sequential

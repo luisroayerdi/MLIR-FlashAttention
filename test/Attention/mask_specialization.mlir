@@ -2,7 +2,7 @@
 //
 // Verify Pass 4: the K/V tile loop's mask-select computation is wrapped in a
 // two-level affine.if dispatching on tile position relative to the causal
-// diagonal (Design.md 6). Shapes: seq_q=64, seq_k=64, head_dim=32 (2x2 tile
+// diagonal. Shapes: seq_q=64, seq_k=64, head_dim=32 (2x2 tile
 // grid at tile size 32), matching test/Attention/tiling.mlir.
 
 // CHECK-LABEL: func.func @tiled_attention

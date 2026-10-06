@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Provisions a rented Ubuntu+CUDA GPU instance (RTX 4090 spot on RunPod or
 # Vast.ai, per NOTES.md's "3-stage compute plan") to build and run this
-# project's Pass 5 Stage A/B GPU work -- Design.md 7.2's prerequisites, made
-# runnable instead of prose. Point of this script: setup should be scripted
-# and reviewed before paying for instance time, not improvised live over
-# SSH (NOTES.md's own framing for this checklist item).
+# project's Pass 5 Stage A/B GPU work -- the GPU build prerequisites in
+# docs/DECISIONS.md, made runnable instead of prose. Point of this script:
+# setup should be scripted and reviewed before paying for instance time, not
+# improvised live over SSH (NOTES.md's own framing for this checklist item).
 #
 # Safe to re-run: every step is built on `cmake`/`ninja`'s own incremental
 # behavior and `git fetch` + `checkout`, not custom "already done" tracking
@@ -19,7 +19,7 @@
 #   --repo-dir DIR     Where to clone/build this project   (default: ~/MLIR-FlashAttention)
 #   --jobs N           Parallel build jobs                 (default: nproc)
 #   --cubin-chip CHIP  Target GPU compute capability        (default: sm_89, RTX 4090/Ada
-#                      -- Design.md 7.2; pass e.g. sm_80 for an A100 Stage 3 instance)
+#                      -- docs/DECISIONS.md; pass e.g. sm_80 for an A100 Stage 3 instance)
 #   --hardware-label L Provenance label for the final `analyze_ablation.py
 #                      --collect --hardware` command (e.g. "RTX 4090
 #                      (Vast.ai)") -- no default provider assumed
@@ -29,14 +29,14 @@
 # What it does, in order:
 #   1. Preflight: confirm nvidia-smi/nvcc actually work on this instance --
 #      fail fast and clearly rather than partway through a long LLVM build.
-#      Prints GPU model + driver + CUDA version, which Requirements.md 5.3's
-#      provenance requirement wants recorded alongside every result anyway.
+#      Prints GPU model + driver + CUDA version, which the provenance
+#      requirement wants recorded alongside every result anyway.
 #   2. Install build dependencies via apt.
 #   3. Clone this project's own llvm-project fork, pinned to the exact
 #      commit this project's Mac development was built and verified
 #      against (not just "whatever llvm-project HEAD happens to be today"),
 #      and build it with NVPTX + the MLIR CUDA runner enabled -- the two
-#      things Design.md 7.2 lists as needed only for Stage 2/3, not for the
+#      things docs/DECISIONS.md lists as needed only for Stage 2/3, not for the
 #      IR-level authoring/FileCheck-testing already done locally.
 #   4. Clone/update this repo and build attention-opt against that build.
 #   5. Set up the Python venv test/numerical/requirements.txt needs.
@@ -44,8 +44,8 @@
 #      FileCheck tests + validate.py --suite) as a build sanity check --
 #      these need no GPU at all, so a failure here means the build itself
 #      is broken, not that anything GPU-specific is.
-#   7. Print the exact next-step commands (matching Design.md/
-#      Requirements.md/TRADEOFFS.md's own documented commands) rather than
+#   7. Print the exact next-step commands (matching TRADEOFFS.md's own
+#      documented commands) rather than
 #      running them -- Stage 2 execution is a deliberate, separate step.
 
 set -euo pipefail
@@ -69,8 +69,8 @@ REPO_DIR="${REPO_DIR:-$HOME/MLIR-FlashAttention}"
 # just lets --help/argument parsing work when poking at this script on a
 # machine without it (e.g. macOS during review).
 JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
-CUBIN_CHIP="${CUBIN_CHIP:-sm_89}"  # RTX 4090 (Ada) -- Design.md 7.2
-# Provenance label for analyze_ablation.py --collect (Requirements.md 5.3) --
+CUBIN_CHIP="${CUBIN_CHIP:-sm_89}"  # RTX 4090 (Ada) -- docs/DECISIONS.md
+# Provenance label for analyze_ablation.py --collect --
 # no default provider assumed; pass --hardware-label or set the env var to
 # whichever marketplace this instance is actually on.
 HARDWARE_LABEL="${HARDWARE_LABEL:-RTX 4090 (unset -- pass --hardware-label)}"
@@ -107,8 +107,8 @@ command -v nvcc >/dev/null 2>&1 || die \
   "cloud instance')."
 nvcc --version | tail -1
 
-echo "GPU + CUDA toolkit look present. Provenance for later result bundles" \
-     "(Requirements.md 5.3): save the two blocks above alongside every" \
+echo "GPU + CUDA toolkit look present. Provenance for later result bundles:" \
+     "save the two blocks above alongside every" \
      "collected number."
 
 # test/numerical/*.py use PEP 604 "X | None" annotations (no
@@ -266,14 +266,14 @@ cat <<EOF
   cd $REPO_DIR
   source .venv/bin/activate
 
-  # Correctness (Requirements.md 5.3): GPU execution vs. the numpy reference
+  # Correctness: GPU execution vs. the numpy reference
   python3 test/numerical/validate.py --gpu --suite
 
   # Wall-clock speedup (Pass 5 Stage A, no tensor cores)
   python3 test/numerical/benchmark.py --gpu --suite
 
   # Stage B: standalone tensor-core microbenchmark vs. the same shape with
-  # no tensor cores (Design.md 7.6) -- exactly each file's own RUN-GPU:
+  # no tensor cores -- exactly each file's own RUN-GPU:
   # comment. Uses mlir-opt (the LLVM build's own tool), NOT attention-opt:
   # -test-transform-dialect-erase-schedule is a *test-only* MLIR pass
   # (mlir::test::registerTestTransformDialectEraseSchedulePass, gated on

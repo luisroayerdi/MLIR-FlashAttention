@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Ablation study (Requirements.md Section 6.4): progressively enable
-passes and measure the speedup delta each contributes, at one fixed shape,
-against the unfused baseline.
+"""Ablation study: progressively enable passes and measure the speedup delta
+each contributes, at one fixed shape, against the unfused baseline.
 
-Reuses benchmark.py's bench_case() for the actual timing (Section 5.2/5.3
-protocol -- fresh subprocess + fresh JIT per trial, median/stdev over
---trials runs) rather than re-implementing timing logic. The default shape
-(seq=32x32, head_dim=16, tile=8, causal mask) is VECTORIZED_SUITE's existing
-masked config from benchmark.py -- already validated, and small enough that
-Vectorization's JIT-compile-time ceiling (Design.md Section 5.3) doesn't
-apply to any ladder step.
+Reuses benchmark.py's bench_case() for the actual timing (fresh subprocess +
+fresh JIT per trial, median/stdev over --trials runs) rather than
+re-implementing timing logic. The default shape (seq=32x32, head_dim=16,
+tile=8, causal mask) is VECTORIZED_SUITE's existing masked config from
+benchmark.py -- already validated, and small enough that Vectorization's
+JIT-compile-time ceiling (docs/DECISIONS.md, Harness) doesn't apply to any
+ladder step.
 
 Two independently runnable modes; default (neither flag) does both:
     --collect   run the ladder, append results to results/ablation.csv
@@ -46,9 +45,9 @@ CSV_FIELDS = [
     "baseline_stdev_pct", "fused_stdev_pct",
 ]
 
-# Cumulative ladder, matching pass implementation order (Requirements.md
-# Section 6.4): each step is a strict superset of the previous step's
-# passes, all measured against the same unfused baseline via bench_case().
+# Cumulative ladder, matching pass implementation order: each step is a
+# strict superset of the previous step's passes, all measured against the
+# same unfused baseline via bench_case().
 LADDER = [
     ("Fusion+Tiling", dict(vectorize=False, mask_specialize=False)),
     ("+ Vectorization", dict(vectorize=True, mask_specialize=False)),
