@@ -3,15 +3,23 @@
 MLIR-FlashAttention establishes, with evidence, what an MLIR compiler needs
 to know about attention to generate FlashAttention-quality kernels.
 
-MLIR-based compilers optimize attention in different ways. IREE represents
-it as a named operator with an online-softmax decomposition, Triton leaves
-the algorithm to the kernel author, and upstream MLIR has no attention
-operator. This project builds FlashAttention's optimizations (fusion,
-online-softmax tiling, vectorization, mask specialization, GPU mapping) as
-separate passes on upstream dialects. It uses them to measure what each
-transformation is worth, what information it needs from the representation,
-and how the result compares with IREE, Triton, TVM, and the FlashAttention
-and cuDNN kernels. Findings are reported to the upstream MLIR community.
+[MLIR]-based compilers optimize attention in different ways. [IREE]
+represents it as a named operator with an online-softmax decomposition,
+[Triton] leaves the algorithm to the kernel author, and upstream MLIR has no
+attention operator. This project builds [FlashAttention]'s optimizations
+(fusion, online-softmax tiling, vectorization, mask specialization, GPU
+mapping) as separate passes on upstream dialects. It uses them to measure
+what each transformation is worth, what information it needs from the
+representation, and how the result compares with IREE, Triton, [TVM], and
+the FlashAttention and [cuDNN] kernels. Findings are reported to the
+upstream MLIR community.
+
+[MLIR]: https://mlir.llvm.org
+[IREE]: https://iree.dev
+[Triton]: https://triton-lang.org
+[FlashAttention]: https://github.com/Dao-AILab/flash-attention
+[TVM]: https://tvm.apache.org
+[cuDNN]: https://developer.nvidia.com/cudnn
 
 The goal, scope, and feature status are in [`SPECS.md`](SPECS.md).
 
