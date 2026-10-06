@@ -1,4 +1,4 @@
-// Pass 5, Stage B (Design.md §7.6): standalone tensor-core microbenchmark,
+// Pass 5, Stage B: standalone tensor-core microbenchmark,
 // deliberately NOT wired into attention-opt's --fusion-pass/--tiling-pass/
 // .../--gpu-lowering-pass pipeline -- see TRADEOFFS.md "GPU lowering: Stage B
 // rescoped..." for why integrating tensor cores into the actual fused/tiled
@@ -34,7 +34,7 @@
 // leftover schedule text too, for the real execution path.)
 
 // RUN line 2 (Stage 2, GPU instance only -- requires an LLVM build with
-// NVPTX + the MLIR CUDA runtime enabled, per Design.md §7.2; not runnable
+// NVPTX + the MLIR CUDA runtime enabled, per docs/DECISIONS.md; not runnable
 // against this Mac build). cubin-chip=sm_89 targets our actual RTX 4090
 // (Ada), not upstream's sm_80 (Ampere) -- tf32 mma.sync is a stable
 // Ampere-generation PTX primitive Ada stays backward-compatible with, so
@@ -104,10 +104,10 @@ func.func @matmul_tensorcore() {
   // (matches the upstream test this mirrors) -- registers this host
   // allocation as CUDA managed/pinned memory so the device can actually
   // dereference it. Getting this order wrong is exactly the kind of
-  // silent-on-FileCheck, broken-on-real-hardware bug Design.md Section 7.6
-  // is about: a plain gpu.launch reading an unregistered host pointer from
-  // device code is invalid, but nothing here catches that short of
-  // executing on a real GPU.
+  // silent-on-FileCheck, broken-on-real-hardware bug recorded in
+  // docs/DECISIONS.md (GPU, gpu.host_register): a plain gpu.launch
+  // reading an unregistered host pointer from device code is invalid, but
+  // nothing here catches that short of executing on a real GPU.
   %ulhs = memref.cast %lhs : !lhs_t to memref<*xf32>
   %urhs = memref.cast %rhs : !rhs_t to memref<*xf32>
   %ures = memref.cast %res : !res_t to memref<*xf32>

@@ -1,10 +1,10 @@
 // RUN: attention-opt %s --fusion-pass --tiling-pass="tile-size=32" --vectorization-pass --mask-specialization-pass | FileCheck %s
 //
-// Requirements.md 9.2 Phase 2 "Integration tests": verify all four Phase 1
-// passes compose correctly in a single pipeline invocation, starting from
-// the raw unfused 5-op sequence (not pre-fused/pre-tiled input, unlike the
-// per-pass test files). Shapes: seq_q=64, seq_k=64, head_dim=32 (2x2 tile
-// grid at tile size 32), matching the other per-pass test files.
+// Integration test: verify all four Phase 1 passes compose correctly in a
+// single pipeline invocation, starting from the raw unfused 5-op sequence
+// (not pre-fused/pre-tiled input, unlike the per-pass test files). Shapes:
+// seq_q=64, seq_k=64, head_dim=32 (2x2 tile grid at tile size 32), matching
+// the other per-pass test files.
 
 // CHECK-LABEL: func.func @attention_unfused
 // CHECK-NOT:   linalg.softmax

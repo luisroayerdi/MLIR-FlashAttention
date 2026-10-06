@@ -5,7 +5,7 @@
 // Must run after --tiling-pass. For each K/V inner tile loop TilingPass
 // emits that applies a boolean mask, wraps its per-iteration body in a
 // two-level affine.if dispatching on tile position relative to the causal
-// diagonal (Design.md §6):
+// diagonal:
 //
 //   MASKED   (k_start > q_end):  skip the tile entirely
 //   FULL     (q_start >= k_end): run the unmasked computation

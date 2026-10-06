@@ -1,8 +1,8 @@
-// Pass 5, Stage B (Design.md §7.6) comparison baseline: the exact same
+// Pass 5, Stage B comparison baseline: the exact same
 // matmul shape/init as gpu_tensor_core_matmul.mlir, lowered WITHOUT the
 // tensor-core rewrite -- single-thread-per-block, matching Stage A's own
-// launch philosophy (§7.4: "one thread per block, no intra-tile
-// parallelism"). Stage 2's wall-clock comparison is this file vs.
+// launch philosophy (one thread per block, no intra-tile parallelism; see
+// docs/DECISIONS.md, GPU). Stage 2's wall-clock comparison is this file vs.
 // gpu_tensor_core_matmul.mlir at the identical shape.
 //
 // RUN line 1 (local, $0, no GPU/NVPTX needed): gpu-kernel-outlining is

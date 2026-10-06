@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Numerical validation harness (Requirements.md Section 5.1).
+"""Numerical validation harness.
 
 Generates random Q/K/V (and optionally a mask), runs them through the real
 MLIR pipeline (attention-opt --fusion-pass --tiling-pass, lowered to LLVM and
@@ -37,7 +37,7 @@ def run_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
         raise ValueError(
             f"seq_q ({seq_q}) and seq_k ({seq_k}) must be divisible by "
             f"tile_size ({tile_size}); TilingPass only supports full tiles "
-            f"(see Design.md 4.6 Known Limitations)."
+            f"(see docs/DECISIONS.md, Passes)."
         )
     if gpu and vectorize:
         raise ValueError(
@@ -127,11 +127,10 @@ def main() -> int:
                               "only affects masked configs) and validate its "
                               "output against the same reference")
     parser.add_argument("--gpu", action="store_true",
-                         help="Pass 5 Stage A (§5.3): execute on GPU via "
+                         help="Pass 5 Stage A: execute on GPU via "
                               "--gpu-lowering-pass instead of CPU mlir-runner "
-                              "-- Design.md 7.2's own explicit test "
-                              "requirement (GPU execution matches the CPU/"
-                              "numpy reference). Only runs against an LLVM "
+                              "-- checks that GPU execution matches the CPU/"
+                              "numpy reference. Only runs against an LLVM "
                               "build with NVPTX + the CUDA runtime enabled "
                               "(not this Mac build -- Stage 2 hardware only). "
                               "Not yet compatible with --vectorize.")

@@ -12,11 +12,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # .dylib on this Mac dev environment; .so on the Linux GPU instance this
-# module also needs to run on (Stage 2 -- see Design.md 7.2/NOTES.md). Picked
-# by platform, not hardcoded, since GPU execution only ever happens on Linux.
+# module also needs to run on (Stage 2 -- see docs/DECISIONS.md/NOTES.md).
+# Picked by platform, not hardcoded, since GPU execution only ever happens
+# on Linux.
 _SHARED_LIB_EXT = ".dylib" if sys.platform == "darwin" else ".so"
 
-# RTX 4090 (Ada) is this project's actual GPU target -- see Design.md 7.2.
+# RTX 4090 (Ada) is this project's actual GPU target -- see docs/DECISIONS.md.
 # Matches the cubin-chip used in test/Attention/gpu_tensor_core_matmul.mlir's
 # and gpu_matmul_no_tensorcore.mlir's documented RUN-GPU lines.
 _GPU_CUBIN_CHIP = "sm_89"
@@ -67,9 +68,9 @@ class Toolchain:
     shared_libs: list[Path]
     # None on a CPU-only build (e.g. this Mac dev environment); populated
     # when the LLVM build this Toolchain points at was built with
-    # -DMLIR_ENABLE_CUDA_RUNNER=ON (Design.md 7.2) -- only the GPU-executing
-    # functions below (run_module_gpu, run_fused_timed_gpu) need it, so its
-    # absence does not fail check(), only check_gpu().
+    # -DMLIR_ENABLE_CUDA_RUNNER=ON (docs/DECISIONS.md) -- only the
+    # GPU-executing functions below (run_module_gpu, run_fused_timed_gpu)
+    # need it, so its absence does not fail check(), only check_gpu().
     cuda_runtime_lib: Path | None = None
 
     @staticmethod
@@ -106,7 +107,7 @@ class Toolchain:
                 f"{_SHARED_LIB_EXT} was not found next to this build's other "
                 "MLIR shared libs. This LLVM build needs "
                 "-DMLIR_ENABLE_CUDA_RUNNER=ON and NVPTX in "
-                "-DLLVM_TARGETS_TO_BUILD -- see Design.md Section 7.2. Not "
+                "-DLLVM_TARGETS_TO_BUILD -- see docs/DECISIONS.md. Not "
                 "available on this Mac dev environment; only on the Stage 2 "
                 "GPU instance."
             )
@@ -193,7 +194,7 @@ def run_fused_timed(module_text: str, tile_size: int, tools: Toolchain,
 
 # ── GPU (Stage 2) execution ─────────────────────────────────────────────────
 #
-# Design.md 7.6 / TRADEOFFS.md: the NVVM pipeline used here
+# docs/DECISIONS.md (GPU) / TRADEOFFS.md: the NVVM pipeline used here
 # (-gpu-lower-to-nvvm-pipeline) has no linalg/memref lowering step of its
 # own at all -- found live, on real hardware, running the full fused kernel
 # for the first time: TilingPass's tile body is almost entirely

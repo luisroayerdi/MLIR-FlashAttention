@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CPU execution benchmark (Requirements.md Section 5.2 - Pre-Hardware Checkpoint).
+"""CPU execution benchmark (Phase 1 pre-hardware checkpoint).
 
 For a given shape, times the naive unfused baseline (linalg ops only, no
 attention-opt passes) against the Pass 1+2 (fusion+tiling) output, both
@@ -9,14 +9,14 @@ calls after an untimed warmup loop -- so process-startup and JIT-compile time
 are excluded from the measurement (see bench_codegen.py).
 
 Runs several independent trials (fresh subprocess + fresh JIT compile each
-time) and reports median/stddev, matching the statistical protocol
-Requirements.md Section 5.3 already uses for GPU timing.
+time) and reports median/stddev, the same statistical protocol used for GPU
+timing.
 
-Acceptance criteria (Section 5.2):
+Acceptance criteria:
     - both variants execute without error
     - numerical correctness validated (reuses validate.run_case)
     - speedup vs unfused > 1.2x
-"perf stat" (cycles/instructions/cache-misses) from Section 5.2 is Linux-only
+"perf stat" (cycles/instructions/cache-misses) profiling is Linux-only
 and unavailable on macOS; this harness reports wall-clock speedup only (the
 actual quantity the acceptance criterion gates on). See TRADEOFFS.md.
 
@@ -36,10 +36,10 @@ from bench_codegen import emit_baseline_module, emit_fused_input_module
 from pipeline import Toolchain, run_baseline_timed, run_fused_timed, run_fused_timed_gpu
 from validate import run_case
 
-SPEEDUP_THRESHOLD = 1.2  # Requirements.md 5.2 acceptance criterion
-GO_NO_GO_THRESHOLD = 1.5  # Requirements.md 5.4 Go/No-Go "PROCEED if >1.5x speedup vs unfused"
-MASK_SPEC_SPEEDUP_THRESHOLD = 1.15  # Requirements.md 4.4 "1.15-1.3x vs generic masking"
-VARIANCE_WARN_FRACTION = 0.05  # Requirements.md 5.3 "flag variance >5%"
+SPEEDUP_THRESHOLD = 1.2  # Phase 1 CPU checkpoint: fused vs unfused
+GO_NO_GO_THRESHOLD = 1.5  # Phase 1 go/no-go: full pipeline vs unfused
+MASK_SPEC_SPEEDUP_THRESHOLD = 1.15  # Phase 1 Pass 4 target vs generic masking
+VARIANCE_WARN_FRACTION = 0.05  # flag stdev above 5% of the median
 
 
 @dataclass
@@ -109,10 +109,10 @@ def bench_case(seq_q: int, seq_k: int, head_dim: int, tile_size: int,
     scale = float(1.0 / np.sqrt(head_dim))
     mask = np.triu(np.ones((seq_q, seq_k), dtype=bool), k=1) if use_mask else None
 
-    # The baseline side always runs on CPU, gpu=True or not -- Requirements.md
-    # 6.4's ablation table reports every rung's speedup against the same
-    # fixed CPU-unfused reference point (Design.md 7.6), not a GPU-executed
-    # baseline. Only the "fused" side switches execution target.
+    # The baseline side always runs on CPU, gpu=True or not -- the ablation
+    # reports every rung's speedup against the same fixed CPU-unfused
+    # reference point, not a GPU-executed baseline. Only the "fused" side
+    # switches execution target.
     fused_module_fn = lambda: emit_fused_input_module(  # noqa: E731
         Q, K, V, scale, mask, warmup_iters, timed_iters, gpu=gpu)
     if gpu:
@@ -158,7 +158,7 @@ def bench_mask_specialization_case(seq_q: int, seq_k: int, head_dim: int,
                                     tile_size: int, seed: int, tools: Toolchain,
                                     trials: int = 5, warmup_iters: int = 5,
                                     timed_iters: int = 50) -> bool:
-    """Requirements.md 4.4's own performance target: speedup of Pass 4
+    """Pass 4's own performance target: speedup of Pass 4
     (--mask-specialization-pass) over Pass 1+2's generic per-element masking,
     both already fusion+tiling'd -- NOT the unfused-baseline comparison
     bench_case() does. Always uses a causal mask (Pass 4 is a no-op
@@ -232,7 +232,7 @@ DEFAULT_SUITE = [
 # --vectorize --suite uses this smaller suite instead of DEFAULT_SUITE.
 #
 # Why: VectorizationPass vectorizes each tile op to its own full static
-# shape (Design.md 5.2 "no manual VF/remainder loop") -- there is no decomposition
+# shape (no manual VF/remainder loop) -- there is no decomposition
 # to hardware-width vectors before JIT. The array-of-vectors LLVM lowering this
 # produces for the QK^T/PV reduction ops scales with tile_size^2 * head_dim;
 # empirically this is fast up to ~4096 (e.g. tile=16,head_dim=16: 7.0x speedup,
@@ -248,12 +248,11 @@ VECTORIZED_SUITE = [
     (32, 32, 16, 8, True),
 ]
 
-# --full-pipeline --suite: Requirements.md 9.2 Phase 2 "CPU benchmarks" /
-# 5.4 Go/No-Go checkpoint, run against the complete Phase 1 pipeline (Pass
-# 1+2+3+4 together) rather than any single pass in isolation. Reuses
-# VECTORIZED_SUITE's shapes/scale (Pass 3 is in the mix, so the same JIT
-# scale ceiling applies -- see that suite's comment); its one masked config
-# also exercises Pass 4.
+# --full-pipeline --suite: the Phase 1 go/no-go checkpoint, run against the
+# complete Phase 1 pipeline (Pass 1+2+3+4 together) rather than any single
+# pass in isolation. Reuses VECTORIZED_SUITE's shapes/scale (Pass 3 is in the
+# mix, so the same JIT scale ceiling applies -- see that suite's comment);
+# its one masked config also exercises Pass 4.
 FULL_PIPELINE_SUITE = VECTORIZED_SUITE
 
 # --mask-specialize --suite uses this suite (via bench_mask_specialization_case,
@@ -284,22 +283,22 @@ def main() -> int:
                          help="benchmark Pass 4 (--mask-specialization-pass) "
                               "against generic per-element masking instead of "
                               "the default unfused-vs-fused comparison "
-                              "(Requirements.md 4.4's own speedup target); "
+                              "(Pass 4's own speedup target); "
                               "always uses a causal mask; --vectorize is "
                               "ignored if both are passed")
     parser.add_argument("--full-pipeline", action="store_true",
-                         help="Requirements.md 9.2 Phase 2 / 5.4 Go/No-Go "
+                         help="Phase 1 go/no-go "
                               "checkpoint: benchmark all four passes together "
                               "(fusion+tiling+vectorization+mask-specialization) "
                               "against the unfused baseline, gated at the >1.5x "
-                              "Go/No-Go threshold instead of 5.2's >1.2x; "
+                              "go/no-go threshold instead of >1.2x; "
                               "overrides --vectorize/--mask-specialize")
     parser.add_argument("--gpu", action="store_true",
-                         help="Pass 5 Stage A (Requirements.md 5.3): run the "
+                         help="Pass 5 Stage A: run the "
                               "fused side via --gpu-lowering-pass and GPU "
                               "execution instead of CPU mlir-runner (the "
-                              "unfused baseline always stays CPU -- see "
-                              "Design.md 7.6). Only against an LLVM build "
+                              "unfused baseline always stays CPU). Only "
+                              "against an LLVM build "
                               "with NVPTX + the CUDA runtime (Stage 2 "
                               "hardware only, not this Mac build). Not yet "
                               "compatible with --vectorize or --full-pipeline.")

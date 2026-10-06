@@ -1,4 +1,4 @@
-"""Generates the two MLIR modules compared by the CPU benchmark (§5.2):
+"""Generates the two MLIR modules compared by the CPU benchmark:
 
   - `emit_baseline_module`: a naive unfused attention function using only
     `linalg.generic`/`linalg.matmul`/`linalg.fill` (softmax expanded into its
