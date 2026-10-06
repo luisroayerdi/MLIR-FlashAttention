@@ -18,7 +18,7 @@ the `SPECS.md` feature that will change them.
 | Decision | Why | Revisit when | Ref |
 |---|---|---|---|
 | Fusion matches on memrefs by tracing DPS inits, not on tensors | The pipeline uses memrefs; tensors would require bufferization interfaces for every custom op | §3.2 recognition of torch-mlir forms (tensor input) | Phase 1 |
-| Fusion assumes f32, single-use intermediates, and an `i1` select mask | It covers the Phase 1 test IR. Not verified: f16 input produces an `attention.fused` that fails verification, and a second reader of an intermediate buffer reads uninitialized memory after fusion | #19 | Phase 1 |
+| Fusion declines non-f32 input, and intermediates that aren't local allocations (`memref.alloc`/`alloca`) used only by the chain and `memref.dealloc`; it assumes an `i1` select mask | `attention.fused` accepts only f32, and fusion stops writing the intermediate buffers, so another reader, including a caller through an argument or a view, would see uninitialized memory. A `linalg.fill` zeroing the QKᵀ accumulator before the QKᵀ generic is allowed | §3.1 f16/bf16; §3.2 recognition of torch-mlir forms | Phase 1 |
 | Q·Kᵀ matched as `linalg.generic` (parallel, parallel, reduction), not `linalg.matmul` | Real unfused IR transposes K through indexing maps; `linalg.matmul` would need K pre-transposed | §3.2 tensor cores (the `mma.sync` rewrite needs `linalg.matmul`) | Phase 1 |
 | Tiling fully lowers `attention.fused` to affine/linalg/memref | Downstream lowering and `mlir-runner` can't handle the custom op | — | Phase 1 |
 | Online softmax is introduced by tiling, not fusion | It only exists for tiled execution; carrying running max/sum in the fused op complicates its definition | — | Phase 1 |
