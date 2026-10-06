@@ -56,3 +56,4 @@ the `SPECS.md` feature that will change them.
 | Timing inside the compiled program (`rtclock`), warmup excluded | Keeps JIT compile and process startup out of measurements | §3.4 CUDA-event timing | Phase 1 |
 | Vectorized benchmarks use a smaller suite (`VECTORIZED_SUITE`: tile 8–16, head_dim 16) | Full-tile vectors JIT-compile in seconds up to tile²·d ≈ 4096 elements and hang at 8192+ | §3.2 production scale | Phase 1 |
 | Unfused baseline expands softmax into four generics | `convert-linalg-to-loops` can't lower `linalg.softmax` | §3.5 baselines | Phase 1 |
+| IREE scripts use their own venv (`benchmarks/iree/.venv`, Python 3.10–3.13) with pinned `torch`, `iree-base-compiler`, `iree-turbine` | `iree-base-compiler` has no Python 3.14 wheels, and the project `.venv` stays NumPy-only | §3.5 pinned baseline versions | #22 |

@@ -1,0 +1,4 @@
+# benchmarks/iree/recognition.py. Python 3.10-3.13 (no 3.14 compiler wheels).
+torch==2.14.1
+iree-base-compiler==3.12.0
+iree-turbine==3.9.0
