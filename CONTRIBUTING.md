@@ -52,9 +52,6 @@ Closes #<N>
 ## Changes
 <what changed and why, a few lines>
 
-## Acceptance
-- [ ] <criterion from the issue> — <evidence: test output, file:line>
-
 ## Prior work
 <closest system in docs/LITERATURE.md, and why it isn't reused here>
 
