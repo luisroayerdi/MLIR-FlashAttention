@@ -69,7 +69,7 @@ Tool paths for `test/numerical/` are discovered from `build/CMakeCache.txt`.
   implemented from `planned` to `implemented`.
 - Before adding a capability, find the closest existing system in
   `docs/LITERATURE.md`. Prefer upstream MLIR or an existing tool over new code.
-- Write the smallest change that meets the acceptance criteria. No speculative
+- Write the smallest change that does what the issue asks. No speculative
   options, abstractions, or files the item does not require.
 - Do not add dialect ops or reimplement a baseline unless an item asks for it.
 - Every pass change ships with a FileCheck test; every change that affects
