@@ -15,8 +15,9 @@ Read `AGENTS.md`, `CONTRIBUTING.md`, `SPECS.md`, `docs/DECISIONS.md`, and
 1. **Find work.** `gh pr list --label needs-review`. If none, stop and say
    so.
 2. **Check out and verify.** `gh pr checkout <N>` in this worktree. Build
-   and run every test in `AGENTS.md` yourself. Treat the PR description's
-   evidence as claims to check, not facts.
+   and run every test in `AGENTS.md` yourself, unless the PR is docs-only
+   (`gh pr diff <N> --name-only` lists only `*.md` files). Treat the PR
+   description's evidence as claims to check, not facts.
 3. **Review.** Read the linked issue and its `SPECS.md` section, then the
    full diff. Apply the checklist in `CONTRIBUTING.md`: spec, scope, prior
    work, tests, standards, size. For prior work, recheck `LITERATURE.md`

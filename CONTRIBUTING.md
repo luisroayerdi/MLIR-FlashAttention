@@ -56,7 +56,7 @@ Closes #<N>
 <closest system in docs/LITERATURE.md, and why it isn't reused here>
 
 ## Tests run
-<exact commands and results>
+<exact commands and results, or "Docs-only">
 ```
 
 A PR:
@@ -70,6 +70,7 @@ A PR:
 ## Review
 
 Reviewers rerun the tests themselves; they don't rely on the PR description.
+Docs-only PRs (changes only `*.md` files) skip the build and tests.
 
 1. **Spec.** Does the PR do what its issue and `SPECS.md` section describe,
    and nothing else?
@@ -78,7 +79,7 @@ Reviewers rerun the tests themselves; they don't rely on the PR description.
    an existing tool already do this? Entries older than 60 days, or any claim
    of novelty, are rechecked against current sources.
 4. **Tests.** Do the build, FileCheck tests, and numerical validation pass?
-   Does new behavior have a test?
+   Does new behavior have a test? Skipped for docs-only PRs.
 5. **Standards.** Does the code follow the standards below?
 6. **Size.** Could the same result be reached with less code?
 

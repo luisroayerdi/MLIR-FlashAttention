@@ -24,7 +24,8 @@ Read `AGENTS.md`, `CONTRIBUTING.md`, and `SPECS.md` before starting.
    these, comment on the issue with the question and stop.
 4. **Implement.** Branch `issue/<N>-<short-name>` from an up-to-date
    `origin/main`. Write the smallest change that does what the issue
-   asks. Build and run the tests in `AGENTS.md`.
+   asks. Build and run the tests in `AGENTS.md`, unless the PR is
+   docs-only (changes only `*.md` files).
 5. **Open the PR.** Use the description format in `CONTRIBUTING.md`, with
    real command output as evidence. `gh pr create --body-file <file>`, then
    `gh pr edit <N> --add-label needs-review`.

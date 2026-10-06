@@ -4,7 +4,8 @@ Guidance for AI agents working in this repository. Humans: see
 `CONTRIBUTING.md` — the process is the same for everyone.
 
 Never push to `main` or merge a PR.
-Always build and run the tests below before opening a PR.
+Always build and run the tests below before opening a PR, unless it is
+docs-only (changes only `*.md` files).
 Never change project scope directly: propose it in a GitHub issue.
 
 ## Project
