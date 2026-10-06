@@ -16,6 +16,13 @@
 // Output:
 //   attention.fused ins(%Q,%K,%V) scale(%s) [mask(%mask)] outs(%out)
 //
+// Preconditions, checked before rewriting (the pattern declines otherwise):
+//   - Q, K, V, output, and scale are f32 (attention.fused accepts only f32).
+//   - Each intermediate buffer (%qk, %sc, %mk, %p) is used only by the
+//     chain, memref.dealloc, and (for %qk) the linalg.fill that zeroes the
+//     accumulator. Fusion stops writing these buffers, so any other reader
+//     would read uninitialized memory.
+//
 //===----------------------------------------------------------------------===//
 
 #include "Attention/AttentionDialect.h"
@@ -95,6 +102,25 @@ static Value extractScaleFromBody(linalg::GenericOp scaleGeneric) {
   return nullptr;
 }
 
+static bool isF32MemRef(Value v) {
+  auto type = dyn_cast<MemRefType>(v.getType());
+  return type && type.getElementType().isF32();
+}
+
+// True if every user of `buf` is one of `chain`, a memref.dealloc, or (when
+// `allowFill`) a linalg.fill writing `buf`.
+static bool onlyUsedByChain(Value buf, ArrayRef<Operation *> chain,
+                            bool allowFill = false) {
+  for (Operation *user : buf.getUsers()) {
+    if (llvm::is_contained(chain, user) || isa<memref::DeallocOp>(user))
+      continue;
+    if (allowFill && isa<linalg::FillOp>(user))
+      continue;
+    return false;
+  }
+  return true;
+}
+
 // ── pattern ────────────────────────────────────────────────────────────────
 
 struct FuseAttentionPattern : public OpRewritePattern<linalg::MatmulOp> {
@@ -158,7 +184,23 @@ struct FuseAttentionPattern : public OpRewritePattern<linalg::MatmulOp> {
     if (!scaleVal)
       return failure();
 
-    // ── Step 6: build attention.fused ─────────────────────────────────────
+    // ── Step 6: preconditions ─────────────────────────────────────────────
+    if (!isF32MemRef(Q) || !isF32MemRef(K) || !isF32MemRef(V) ||
+        !isF32MemRef(outBuf) || !scaleVal.getType().isF32())
+      return failure();
+
+    // Without a mask, softmax reads the scaled buffer directly.
+    Value scaledBuf = scaleOp.getDpsInits()[0];
+    Operation *scaledReader = maskOp ? maskOp.getOperation()
+                                     : softmax.getOperation();
+    if (!onlyUsedByChain(qkBuf, {qkGeneric, scaleOp}, /*allowFill=*/true) ||
+        !onlyUsedByChain(scaledBuf, {scaleOp, scaledReader}) ||
+        !onlyUsedByChain(probsBuf, {softmax, pvMatmul}))
+      return failure();
+    if (maskOp && !onlyUsedByChain(softmaxInBuf, {maskOp, softmax}))
+      return failure();
+
+    // ── Step 7: build attention.fused ─────────────────────────────────────
     rewriter.setInsertionPoint(pvMatmul);
     rewriter.create<FusedOp>(pvMatmul.getLoc(), Q, K, V, scaleVal, maskBuf,
                              outBuf);
