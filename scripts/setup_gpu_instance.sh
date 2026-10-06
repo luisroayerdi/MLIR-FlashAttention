@@ -29,8 +29,8 @@
 # What it does, in order:
 #   1. Preflight: confirm nvidia-smi/nvcc actually work on this instance --
 #      fail fast and clearly rather than partway through a long LLVM build.
-#      Prints GPU model + driver + CUDA version, which the provenance
-#      requirement wants recorded alongside every result anyway.
+#      Prints GPU model + driver + CUDA version, which should be recorded
+#      alongside every result anyway.
 #   2. Install build dependencies via apt.
 #   3. Clone this project's own llvm-project fork, pinned to the exact
 #      commit this project's Mac development was built and verified
@@ -45,8 +45,8 @@
 #      these need no GPU at all, so a failure here means the build itself
 #      is broken, not that anything GPU-specific is.
 #   7. Print the exact next-step commands (matching TRADEOFFS.md's own
-#      documented commands) rather than
-#      running them -- Stage 2 execution is a deliberate, separate step.
+#      documented commands) rather than running them -- Stage 2 execution
+#      is a deliberate, separate step.
 
 set -euo pipefail
 

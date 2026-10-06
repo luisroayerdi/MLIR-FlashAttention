@@ -18,7 +18,7 @@ the `SPECS.md` feature that will change them.
 | Decision | Why | Revisit when | Ref |
 |---|---|---|---|
 | Fusion matches on memrefs by tracing DPS inits, not on tensors | The pipeline uses memrefs; tensors would require bufferization interfaces for every custom op | §3.2 recognition of torch-mlir forms (tensor input) | Phase 1 |
-| Fusion matches only f32, the exact five-op sequence with single-use intermediates, and a boolean (`i1`) select mask | It covers the Phase 1 test IR; other softmax forms and additive bias masks don't match | §3.2 recognition of torch-mlir forms; §3.1 f16/bf16 | Phase 1 |
+| Fusion assumes f32, single-use intermediates, and an `i1` select mask | It covers the Phase 1 test IR. Not verified: f16 input produces an `attention.fused` that fails verification, and a second reader of an intermediate buffer reads uninitialized memory after fusion | #19 | Phase 1 |
 | Q·Kᵀ matched as `linalg.generic` (parallel, parallel, reduction), not `linalg.matmul` | Real unfused IR transposes K through indexing maps; `linalg.matmul` would need K pre-transposed | §3.2 tensor cores (the `mma.sync` rewrite needs `linalg.matmul`) | Phase 1 |
 | Tiling fully lowers `attention.fused` to affine/linalg/memref | Downstream lowering and `mlir-runner` can't handle the custom op | — | Phase 1 |
 | Online softmax is introduced by tiling, not fusion | It only exists for tiled execution; carrying running max/sum in the fused op complicates its definition | — | Phase 1 |
@@ -30,7 +30,7 @@ the `SPECS.md` feature that will change them.
 | Ops with i1 mask memrefs are never vectorized | Vectorizing i1 memrefs corrupted masked results (~1.0 max error) | §3.1 affine masks (no mask memref) | Phase 1 |
 | Vectorization is best-effort: ops `linalg::vectorize` rejects stay scalar | A dynamic shape or unsupported op shouldn't fail the pipeline | — | Phase 1 |
 | Mask specialization uses inline `affine.if` plus block cloning, not outlined functions | Outlining needs synthesized signatures and a later inlining step | — | Phase 1 |
-| Mask specialization runs after tiling and handles square causal masks only | It classifies tiles of the `affine.for` nest tiling creates, by their position relative to the diagonal | §3.2 affine mask families | Phase 1 |
+| Mask specialization runs after tiling and assumes a top-left-aligned causal mask (`mask[i,j]` true iff `j > i`); seq_q ≠ seq_k is allowed | It classifies tiles of the `affine.for` nest tiling creates by `i`/`j` position alone. Not verified: a causal mask aligned differently (e.g. bottom-right when seq_q ≠ seq_k) is misclassified | §3.2 affine mask families | Phase 1 |
 | Mask classification uses loop indices only; causal precondition not verified | Reading the mask to decide whether to skip reading it defeats the purpose | §3.2 precondition verification | Phase 1 |
 | Passes declare `getDependentDialects` | MLIR loads dialects only when parsed; created ops would otherwise fail | — | Phase 1 |
 
