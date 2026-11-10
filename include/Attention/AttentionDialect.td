@@ -19,9 +19,7 @@ def Attention_Dialect : Dialect {
     let name = "attention";
     let summary = "A attention out-of-tree MLIR dialect.";
     let description = [{
-        This dialect is an example of an out-of-tree MLIR dialect designed to
-        illustrate the basic setup required to develop MLIR-based tools without
-        working inside of the LLVM source tree.
+        Attention dialect: one op, attention.fused, marking a recognized attention computation
     }];
     let cppNamespace = "::mlir::attention";
 
